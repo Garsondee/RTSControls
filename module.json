@@ -1,5 +1,5 @@
 {
-  "id": "RTSControls",
+  "id": "rtscontrols",
   "title": "RTS Controls",
   "description": "This module will attempt to add RTS like controls to token movement using the Routinglib library.\n\n",
   "version": "#{VERSION}#",
