@@ -1,25 +1,31 @@
 {
-  "id": "module",
-  "title": "New Module",
-  "description": "",
+  "id": "RTSControls",
+  "title": "RTS Controls",
+  "description": "This module will attempt to add RTS like controls to token movement using the Routinglib library.\n\n",
   "version": "#{VERSION}#",
   "library": "false",
   "manifestPlusVersion": "1.2.0",
   "compatibility": {
-    "minimum": 10,
-    "verified": 10,
+    "minimum": 11,
+    "verified": 11,
     "maximum": 11
   },
   "authors": [
     {
-      "name": "The League of Extraordinary FVTT Developers",
-      "url": "https://github.com/League-of-Foundry-Developers",
-      "discord": "discordID#0001"
+      "name": "Ingram Blakelock",
+      "url": "https://github.com/Garsondee/RTSControls",
+      "discord": "garsondee"
     }
   ],
   "relationships": {
     "systems": [],
-    "requires": []
+    "requires": [
+      {
+        "id": "routinglib",
+        "type": "module",
+        "manifest": "https://raw.githubusercontent.com/manuelVo/foundryvtt-routinglib/master/module.json"
+      }
+    ]
   },
   "esmodules": [
     "scripts/module.js"
