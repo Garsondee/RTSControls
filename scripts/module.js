@@ -1,3 +1,31 @@
+let rightClickStartTime = 0;
+const clickThreshold = 100; // milliseconds
+
+document.addEventListener("mousedown", (event) => {
+    // Check if the right mouse button was pressed
+    if (event.button === 2) {
+        rightClickStartTime = Date.now();
+    }
+});
+
+document.addEventListener("mouseup", (event) => {
+    // Check if the right mouse button was released
+    if (event.button === 2) {
+        const clickDuration = Date.now() - rightClickStartTime;
+        if (clickDuration < clickThreshold) {
+            console.log("Detected a click");
+            // Handle click event here
+        } else {
+            console.log("Detected a pan");
+            // Handle pan event here
+        }
+    }
+});
+
+
+
+
+
 async function findPath(start, end) {
     // Check if start and end are properly defined
     if (!start || start.x === undefined || start.y === undefined) {
@@ -299,6 +327,15 @@ const movementManager = new MovementManager();
 // Event listener for right-click context menu to initiate token movement
 document.addEventListener("contextmenu", async (event) => {
     event.preventDefault();
+
+    // Calculate the duration of the right-click
+    const clickDuration = Date.now() - rightClickStartTime;
+
+    // If the duration exceeds the threshold, it's considered a pan, not a click
+    if (clickDuration >= clickThreshold) {
+        console.log("Ignoring pan action for token movement.");
+        return; // Exit the function early to avoid initiating token movement
+    }
 
     // Translate the click position to canvas coordinates
     const transform = canvas.app.stage.worldTransform;
