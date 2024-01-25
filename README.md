@@ -1,5 +1,5 @@
 # RTS Controls - Right Click to Move
-## RTS (Real-Time Strategy) Controls - Right Click to Move is a module for Foundry Virtual Tabletop (Foundry VTT) that enhances the user experience by enabling intuitive and real-time token movement controls. Inspired by classic RTS games, this module allows users to direct their tokens across the game map efficiently and interactively. With a simple right-click, players can plot a course for their tokens, bringing a dynamic and strategic layer to their game sessions.
+RTS (Real-Time Strategy) Controls - Right Click to Move is a module for Foundry Virtual Tabletop (Foundry VTT) that enhances the user experience by enabling intuitive and real-time token movement controls. Inspired by classic RTS games, this module allows users to direct their tokens across the game map efficiently and interactively. With a simple right-click, players can plot a course for their tokens, bringing a dynamic and strategic layer to their game sessions.
 
 ### Features
 Intuitive Control: Streamline token movements with a simple right-click interface, mimicking the familiar controls of traditional RTS games.
