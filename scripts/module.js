@@ -1,3 +1,58 @@
+// Hook for init event
+Hooks.on("init", () => {
+    console.log("RTS Controls initialized");
+
+    // Create a setting for the camera panning control
+    game.settings.register("rtscontrols", "cameraPanning", {
+        name: "Camera Panning",
+        hint: "Enable camera panning when the token moves.",
+        scope: "client",
+        config: true,
+        type: Boolean,
+        default: true,
+    });
+
+    // Setting for the destination circle colour with a dropdown menu
+    game.settings.register("rtscontrols", "destinationCircleColor", {
+        name: "Destination Circle Colour",
+        hint: "Set the colour of the destination circle by selecting a color name.",
+        scope: "client",
+        config: true,
+        type: String,
+        choices: {           // Expanded options in the select menu with human-readable names
+            "#ff0000": "Red",
+            "#00ff00": "Green",
+            "#0000ff": "Blue",
+            "#ffff00": "Yellow",
+            "#ff00ff": "Magenta",
+            "#00ffff": "Cyan",
+            "#ffffff": "White",
+            "#000000": "Black",
+            "#800000": "Maroon",
+            "#808000": "Olive",
+            "#008000": "Dark Green",
+            "#800080": "Purple",
+            "#008080": "Teal",
+            "#c0c0c0": "Silver",
+            "#ff6347": "Tomato",
+            "#40e0d0": "Turquoise",
+            "#ee82ee": "Violet",
+            "#f5deb3": "Wheat",
+            "#ffa500": "Orange",
+            "#a52a2a": "Brown",
+            "#87ceeb": "Sky Blue",
+            "#6a5acd": "Slate Blue",
+            "#708090": "Slate Gray",
+            "#2e8b57": "Sea Green",
+            "#d2b48c": "Tan",
+            "#ff69b4": "Hot Pink"
+        },
+        default: "Red", // Default value is the name of the color
+    });
+});
+
+
+
 let rightClickStartTime = 0;
 const clickThreshold = 100; // milliseconds
 
@@ -41,7 +96,7 @@ async function findPath(start, end) {
     const from = { x: start.x, y: start.y };
 
     // Define the options object
-    const options = { interpolate: false }; // Now the pathfinder will emit a waypoint for every grid cell
+    const options = { interpolate: true }; // Now the pathfinder will emit a waypoint for every grid cell
 
     console.log(`Calculating path from (${from.x}, ${from.y}) to (${end.x}, ${end.y})`);
 
@@ -132,6 +187,9 @@ class MovementManager {
         const movementColor = 0xff0000; // Define color or retrieve it based on token properties
         visualManager.drawPathLine(token.id, gridSpaces, movementColor);
         visualManager.drawDestinationCircle(token.id, destination, movementColor);
+
+        // Initiate camera pan to the destination
+        this.panCameraToDestination(destination);
 
         const movement = {
             token: token,
@@ -290,24 +348,20 @@ class MovementManager {
     }
 
     // Moves the token to the specified position
-    moveToken(token, position) {
-        // Define the update data for the token's new position
+    async moveToken(token, position) {
         const updateData = {
             x: position.x * canvas.grid.size,
             y: position.y * canvas.grid.size
         };
 
-        // Get the TokenDocument from the Token object
         const tokenDocument = token.document;
 
-        // Update the token's position using the TokenDocument's update method
-        tokenDocument.update(updateData).then(() => {
-            // console.log(`Token ${token.name} moved to (${position.x}, ${position.y})`);
+        try {
+            await tokenDocument.update(updateData);
+            console.log(`Token ${token.name} moved to (${position.x}, ${position.y})`);
 
-            // Check if the movement still exists before trying to access its properties
             const movement = this.movements.get(token.id);
             if (movement) {
-                // Release the previous space and reserve the new space
                 const previousIndex = movement.currentIndex - 1;
                 if (previousIndex >= 0) {
                     const previousSpace = movement.gridSpaces[previousIndex];
@@ -315,11 +369,39 @@ class MovementManager {
                 }
                 gridSpaceManager.reserveSpace(position, token.id, movement.currentIndex);
             }
-        }).catch(err => {
+
+            // Removed the panCameraToToken call here to stop following the token
+        } catch (err) {
             console.error(`Error moving token ${token.name}:`, err);
-        });
+        }
+    }
+
+    // Method to pan the camera smoothly to a token's position
+    panCameraToDestination(destination) {
+
+        // Check if the setting for camera panning is enabled, if disabled return early
+        if (!game.settings.get("rtscontrols", "cameraPanning")) {
+            return;
+        }
+
+
+        const position = {
+            x: destination.x * canvas.grid.size + canvas.grid.size / 2,
+            y: destination.y * canvas.grid.size + canvas.grid.size / 2
+        };
+        const panOptions = {
+            x: position.x,
+            y: position.y,
+            duration: 3000, // Duration of the camera pan in milliseconds
+            ease: "easeInOut" // Use an easing function for smooth transition
+        };
+
+        // Use Foundry VTT's animatePan method to smoothly pan the camera
+        canvas.animatePan(panOptions);
     }
 }
+
+
 
 // Instantiate the Movement Manager
 const movementManager = new MovementManager();
@@ -489,7 +571,7 @@ class VisualManager {
         }
     }
 
-    drawDestinationCircle(tokenId, destination, color) {
+    drawDestinationCircle(tokenId, destination) {
         let circleGraphics = this.circleGraphicsMap.get(tokenId);
         if (!circleGraphics) {
             circleGraphics = new PIXI.Graphics();
@@ -500,6 +582,11 @@ class VisualManager {
         }
 
         const halfGridSize = canvas.grid.size / 2;
+
+        // Override the colour with the one from the settings by getting from the settings
+        let color = game.settings.get("rtscontrols", "destinationCircleColor");
+
+
         circleGraphics.beginFill(color, 0.1);
         circleGraphics.drawCircle(destination.x * canvas.grid.size + halfGridSize, destination.y * canvas.grid.size + halfGridSize, canvas.grid.size / 2);
         circleGraphics.endFill();
