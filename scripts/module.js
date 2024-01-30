@@ -2,6 +2,26 @@
 Hooks.on("init", () => {
     console.log("RTS Controls initialized");
 
+    // Create a setting for disabling the whole module
+    game.settings.register("rtscontrols", "disableModule", {
+        name: "Enable Module",
+        hint: "Enable the entire module. This allows each user to turn the module off if they prefer the original movement controls.",
+        scope: "client",
+        config: true,
+        type: Boolean,
+        default: true,
+    })
+
+    // Create a setting for disabling line drawing
+    game.settings.register("rtscontrols", "drawPathLine", {
+        name: "Disable Line Drawing",
+        hint: "Disable line drawing when the token moves.",
+        scope: "client",
+        config: true,
+        type: Boolean,
+        default: false,
+    })
+
     // Create a setting for the camera panning control
     game.settings.register("rtscontrols", "cameraPanning", {
         name: "Camera Panning",
@@ -12,6 +32,16 @@ Hooks.on("init", () => {
         default: true,
     });
 
+    // Allow right-click to move whilst in combat mode - default off
+    game.settings.register("rtscontrols", "allowRightClickCombat", {
+        name: "Combat Right Click to Move",
+        hint: "Allow right click to move while in combat mode.",
+        scope: "client",
+        config: true,
+        type: Boolean,
+        default: false,
+    })
+
     // Setting for the destination circle colour with a dropdown menu
     game.settings.register("rtscontrols", "destinationCircleColor", {
         name: "Destination Circle Colour",
@@ -19,42 +49,30 @@ Hooks.on("init", () => {
         scope: "client",
         config: true,
         type: String,
-        choices: {           // Expanded options in the select menu with human-readable names
+        choices: {           // Defines the options in the select menu with human-readable names
             "#ff0000": "Red",
             "#00ff00": "Green",
             "#0000ff": "Blue",
-            "#ffff00": "Yellow",
-            "#ff00ff": "Magenta",
-            "#00ffff": "Cyan",
-            "#ffffff": "White",
-            "#000000": "Black",
-            "#800000": "Maroon",
-            "#808000": "Olive",
-            "#008000": "Dark Green",
-            "#800080": "Purple",
-            "#008080": "Teal",
-            "#c0c0c0": "Silver",
-            "#ff6347": "Tomato",
-            "#40e0d0": "Turquoise",
-            "#ee82ee": "Violet",
-            "#f5deb3": "Wheat",
-            "#ffa500": "Orange",
-            "#a52a2a": "Brown",
-            "#87ceeb": "Sky Blue",
-            "#6a5acd": "Slate Blue",
-            "#708090": "Slate Gray",
-            "#2e8b57": "Sea Green",
-            "#d2b48c": "Tan",
-            "#ff69b4": "Hot Pink"
+            "#ffff00": "Yellow"
         },
         default: "Red", // Default value is the name of the color
     });
+
+    // Setting for pathfinding distance called maxPathfindDistance
+    game.settings.register("rtscontrols", "maxPathfindDistance", {
+        name: "Maximum Pathfinding Distance",
+        hint: "Set the maximum distance in grid spaces for pathfinding. A lower value may prevent accidental misclicks from revealing parts of the map. A good middle value is 90.",
+        scope: "client",
+        config: true,
+        type: Number,
+        default: 90,
+    })
+
+
 });
 
-
-
 let rightClickStartTime = 0;
-const clickThreshold = 100; // milliseconds
+const clickThreshold = 150; // milliseconds
 
 document.addEventListener("mousedown", (event) => {
     // Check if the right mouse button was pressed
@@ -72,14 +90,13 @@ document.addEventListener("mouseup", (event) => {
             // Handle click event here
         } else {
             console.log("Detected a pan");
-            // Handle pan event here
+            // If a camera pan is in progress, attempt to cancel it
+            if (movementManager.isCameraPanning) {
+                movementManager.cancelCameraPan();
+            }
         }
     }
 });
-
-
-
-
 
 async function findPath(start, end) {
     // Check if start and end are properly defined
@@ -96,7 +113,7 @@ async function findPath(start, end) {
     const from = { x: start.x, y: start.y };
 
     // Define the options object
-    const options = { interpolate: true }; // Now the pathfinder will emit a waypoint for every grid cell
+    const options = { interpolate: true, maxDistance: game.settings.get("rtscontrols", "maxPathfindDistance") }; // Now the pathfinder will emit a waypoint for every grid cell
 
     console.log(`Calculating path from (${from.x}, ${from.y}) to (${end.x}, ${end.y})`);
 
@@ -109,6 +126,10 @@ async function findPath(start, end) {
             return { path: pathResult.path, cost: pathResult.cost };
         } else {
             console.warn(`No path or empty path found`);
+            // Foundry VTT notification
+            ui.notifications.warn(`Either there is no path or the path is too long. Try increase max distance in settings if this move should be possible.`);
+
+
             return null;
         }
     } catch (error) {
@@ -159,6 +180,8 @@ class MovementManager {
         this.movements = new Map();
         this.tickRate = 500;
         this.tickInterval = null;
+        this.isCameraPanning = false; // Track camera panning state
+        this.allowCameraPanning = true; // New flag to control camera panning
     }
 
     startMovement(token, path) {
@@ -170,26 +193,23 @@ class MovementManager {
         const gridSpaces = GridSpaceCalculator.calculateGridSpacesForPath(path);
         console.log(`Calculated grid spaces for token ${token.name}:`, gridSpaces);
 
-        // Check if there are any grid spaces to move to
         if (gridSpaces.length === 0) {
             console.warn(`No grid spaces to move to for token ${token.name} with ID ${token.id}`);
-            return; // Do not start movement if there are no grid spaces
+            return;
         }
 
-        // Reserve grid spaces for the new movement
         gridSpaces.forEach((space, index) => {
             console.log(`Reserving space for token ${token.name} at index ${index}:`, space);
             gridSpaceManager.reserveSpace(space, token.id, index);
         });
 
-        // Visualize the path and destination
         const destination = path[path.length - 1];
-        const movementColor = 0xff0000; // Define color or retrieve it based on token properties
+        const movementColor = 0xff0000;
         visualManager.drawPathLine(token.id, gridSpaces, movementColor);
         visualManager.drawDestinationCircle(token.id, destination, movementColor);
 
         // Initiate camera pan to the destination
-        this.panCameraToDestination(destination);
+        this.panCameraAlongPath(path);
 
         const movement = {
             token: token,
@@ -197,8 +217,8 @@ class MovementManager {
             currentIndex: 0,
             isMoving: true,
             isPaused: false,
-            destination: destination, // Set the destination property correctly
-            color: movementColor, // Store the color for future reference
+            destination: destination,
+            color: movementColor,
         };
 
         this.movements.set(token.id, movement);
@@ -209,7 +229,6 @@ class MovementManager {
             this.tickInterval = setInterval(() => this.tick(), this.tickRate);
         }
     }
-
 
     tick() {
         // Check if the game is paused and return early if it is
@@ -275,9 +294,7 @@ class MovementManager {
         });
     }
 
-
-
-// Method to resolve conflicts when two tokens are on the same grid space
+    // Method to resolve conflicts when two tokens are on the same grid space
     resolveOverlapConflict(tokenId) {
         const movement = this.movements.get(tokenId);
         if (!movement) return;
@@ -319,6 +336,8 @@ class MovementManager {
 
             this.movements.delete(tokenId);
             this.resolveOverlapConflict(tokenId);
+
+            this.allowCameraPanning = true;
         }
     }
 
@@ -328,6 +347,29 @@ class MovementManager {
         if (movement) {
             movement.isPaused = true;
             console.log(`Paused movement for token with ID ${tokenId}`);
+        }
+    }
+
+    // Method to cancel camera pan
+    cancelCameraPan() {
+        if (this.isCameraPanning) {
+            console.log("Cancelling camera pan");
+
+            // Get the current camera (view) position
+            const { x, y } = canvas.stage.pivot;
+
+            // Instantly pan the camera to its current position, effectively stopping it
+            canvas.animatePan({
+                x: x,
+                y: y,
+                duration: 0 // Instantly apply the pan without animation
+            });
+
+            // Reset the camera panning flag
+            this.isCameraPanning = false;
+
+            // Keep camera panning disabled
+            this.allowCameraPanning = false;
         }
     }
 
@@ -376,29 +418,102 @@ class MovementManager {
         }
     }
 
-    // Method to pan the camera smoothly to a token's position
-    panCameraToDestination(destination) {
 
-        // Check if the setting for camera panning is enabled, if disabled return early
-        if (!game.settings.get("rtscontrols", "cameraPanning")) {
+
+
+
+    // Method to pan the camera smoothly to a token's position
+    async panCameraAlongPath(rawPath) {
+        if (!this.allowCameraPanning || !game.settings.get("rtscontrols", "cameraPanning") || rawPath.length === 0) {
+            console.log("Camera panning is disabled or path is empty.");
             return;
         }
 
+        // Check if camera panning is allowed
+        if (!this.allowCameraPanning) {
+            console.log("Camera panning has been cancelled.");
+            return;
+        }
 
-        const position = {
-            x: destination.x * canvas.grid.size + canvas.grid.size / 2,
-            y: destination.y * canvas.grid.size + canvas.grid.size / 2
-        };
-        const panOptions = {
-            x: position.x,
-            y: position.y,
-            duration: 3000, // Duration of the camera pan in milliseconds
-            ease: "easeInOut" // Use an easing function for smooth transition
-        };
+        this.isCameraPanning = true; // Indicate that camera panning has started
 
-        // Use Foundry VTT's animatePan method to smoothly pan the camera
-        canvas.animatePan(panOptions);
+        // Smooth out the path coordinates
+        const path = averagePathCoords(rawPath);
+
+        console.log(`Panning camera along smoothed path: ${JSON.stringify(path)}`);
+
+        const gridSize = canvas.grid.size;
+        let animations = []; // Array to hold promises for each animation
+
+        for (let i = 0; i < path.length; i++) {
+            const point = path[i];
+            const pixelX = (point.x * gridSize) + (gridSize / 2); // Center of the grid cell
+            const pixelY = (point.y * gridSize) + (gridSize / 2);
+
+            // For the first point, pan immediately. For subsequent points, delay based on index.
+            const delay = i === 0 ? 0 : 3000; // Adjust delay as needed
+
+            // Wrap the animation in a promise and push it to the animations array
+            let animationPromise = new Promise((resolve) => {
+                setTimeout(() => {
+                    canvas.animatePan({
+                        x: pixelX,
+                        y: pixelY,
+                        duration: 2000, // Adjust duration as needed for smoothness
+                        // Resolve the promise once the animation is complete
+                        onComplete: resolve
+                    });
+                }, delay);
+            });
+
+            animations.push(animationPromise);
+        }
+
+        // Wait for all animations to complete
+        await Promise.all(animations);
+
+        this.isCameraPanning = false; // Reset the flag once all panning is complete
     }
+}
+
+function averagePathCoords(path, neighborhoodSize = 2, similarityThreshold = 0.5) {
+    if (path.length < 2 * neighborhoodSize + 1) {
+        // If the path is too short for the chosen neighborhood size, return it unchanged.
+        return path;
+    }
+
+    let smoothedPath = [];
+
+    for (let i = 0; i < path.length; i++) {
+        let sumX = 0, sumY = 0, count = 0;
+
+        // Summing over the neighborhood
+        for (let j = -neighborhoodSize; j <= neighborhoodSize; j++) {
+            const index = i + j;
+            if (index >= 0 && index < path.length) {
+                sumX += path[index].x;
+                sumY += path[index].y;
+                count++;
+            }
+        }
+
+        const averagedPoint = {
+            x: sumX / count,
+            y: sumY / count,
+        };
+
+        // Add point if it's sufficiently different from the previous one
+        if (i === 0 || distanceBetween(averagedPoint, smoothedPath[smoothedPath.length - 1]) >= similarityThreshold) {
+            smoothedPath.push(averagedPoint);
+        }
+    }
+
+    return smoothedPath;
+}
+
+// Helper function to calculate distance between two points
+function distanceBetween(point1, point2) {
+    return Math.sqrt(Math.pow(point2.x - point1.x, 2) + Math.pow(point2.y - point1.y, 2));
 }
 
 
@@ -406,52 +521,72 @@ class MovementManager {
 // Instantiate the Movement Manager
 const movementManager = new MovementManager();
 
-// Event listener for right-click context menu to initiate token movement
-document.addEventListener("contextmenu", async (event) => {
-    event.preventDefault();
+    // Event listener for right-click context menu to initiate token movement
+    document.addEventListener("contextmenu", async (event) => {
+        event.preventDefault();
 
-    // Calculate the duration of the right-click
-    const clickDuration = Date.now() - rightClickStartTime;
+        // Reset the camera panning allowance
+        movementManager.allowCameraPanning = true;
 
-    // If the duration exceeds the threshold, it's considered a pan, not a click
-    if (clickDuration >= clickThreshold) {
-        console.log("Ignoring pan action for token movement.");
-        return; // Exit the function early to avoid initiating token movement
-    }
-
-    // Translate the click position to canvas coordinates
-    const transform = canvas.app.stage.worldTransform;
-    const toX = (event.clientX - transform.tx) / canvas.stage.scale.x;
-    const toY = (event.clientY - transform.ty) / canvas.stage.scale.y;
-
-    const toGridX = Math.floor(toX / canvas.grid.size);
-    const toGridY = Math.floor(toY / canvas.grid.size);
-
-    const selectedTokens = canvas.tokens.controlled;
-    if (selectedTokens.length === 0) return;
-
-    const gridSize = canvas.grid.size;
-    const destination = { x: toGridX, y: toGridY };
-
-    // Find alternative destinations for all tokens
-    const alternatives = await findAlternativeDestinations(destination, gridSize, selectedTokens.length);
-
-    // Calculate paths from each token's current location to the destination
-    for (let i = 0; i < selectedTokens.length; i++) {
-        const token = selectedTokens[i];
-        const start = gridSpaceManager.getGridSpaceFromToken(token); // Get the token's current grid space
-
-        // Use the clicked destination for the first token, or the best alternative destination for others
-        const targetDestination = (i < alternatives.length) ? alternatives[i].position : destination;
-
-        const pathResult = await findPath(start, targetDestination, gridSize);
-        if (pathResult && pathResult.path) {
-            movementManager.startMovement(token, pathResult.path);
-        } else {
-            console.warn(`No path found for token ${token.name} with ID ${token.id}`);
+        // Return early if the setting is disabled
+        if (!game.settings.get("rtscontrols", "disableModule")) {
+            console.log("Token movement is disabled.");
+            return; // Exit the function early to avoid initiating token movement
         }
-    }
-});
+
+
+        // Check if the game is in combat mode
+        if (game.combat && game.combat.active) {
+            // Check the setting to see if right-click to move should be allowed in combat
+            if (!game.settings.get("rtscontrols", "allowRightClickCombat")) {
+                console.log("Game is in combat mode, right-click to move is disabled.");
+                ui.notifications.warn("Game is in combat mode, right-click to move is disabled by default.");
+                return; // Exit the function early to avoid initiating token movement
+            }
+        }
+
+        // Calculate the duration of the right-click
+        const clickDuration = Date.now() - rightClickStartTime;
+
+        // If the duration exceeds the threshold, it's considered a pan, not a click
+        if (clickDuration >= clickThreshold) {
+            console.log("Ignoring pan action for token movement.");
+            return; // Exit the function early to avoid initiating token movement
+        }
+
+        // Translate the click position to canvas coordinates
+        const transform = canvas.app.stage.worldTransform;
+        const toX = (event.clientX - transform.tx) / canvas.stage.scale.x;
+        const toY = (event.clientY - transform.ty) / canvas.stage.scale.y;
+
+        const toGridX = Math.floor(toX / canvas.grid.size);
+        const toGridY = Math.floor(toY / canvas.grid.size);
+
+        const selectedTokens = canvas.tokens.controlled;
+        if (selectedTokens.length === 0) return;
+
+        const gridSize = canvas.grid.size;
+        const destination = { x: toGridX, y: toGridY };
+
+        // Find alternative destinations for all tokens
+        const alternatives = await findAlternativeDestinations(destination, gridSize, selectedTokens.length);
+
+        // Calculate paths from each token's current location to the destination
+        for (let i = 0; i < selectedTokens.length; i++) {
+            const token = selectedTokens[i];
+            const start = gridSpaceManager.getGridSpaceFromToken(token); // Get the token's current grid space
+
+            // Use the clicked destination for the first token, or the best alternative destination for others
+            const targetDestination = (i < alternatives.length) ? alternatives[i].position : destination;
+
+            const pathResult = await findPath(start, targetDestination, gridSize);
+            if (pathResult && pathResult.path) {
+                movementManager.startMovement(token, pathResult.path);
+            } else {
+                console.warn(`No path found for token ${token.name} with ID ${token.id}`);
+            }
+        }
+    });
 
 // Event listeners for Foundry VTT's pause and resume game events
 Hooks.on("pauseGame", () => {
@@ -538,6 +673,9 @@ class VisualManager {
     }
 
     drawPathLine(tokenId, gridSpaces, movementColor) {
+
+
+
         let lineGraphics = this.lineGraphicsMap.get(tokenId);
         if (!lineGraphics) {
             lineGraphics = new PIXI.Graphics();
@@ -547,9 +685,12 @@ class VisualManager {
             lineGraphics.clear();
         }
 
+
         const halfGridSize = canvas.grid.size / 2;
         const lineAlpha = 0.5; // Base alpha value for the line
         const fadeLength = 5; // Number of segments to apply the fading effect to
+
+
 
         if (gridSpaces.length > 0) {
             const firstSpace = gridSpaces[0];
@@ -565,8 +706,13 @@ class VisualManager {
                 // Set the line style with the calculated alpha
                 lineGraphics.lineStyle({ width: 2, color: movementColor, alpha: segmentAlpha, alignment: 0.5 });
 
-                // Draw the line segment
-                lineGraphics.lineTo(space.x * canvas.grid.size + halfGridSize, space.y * canvas.grid.size + halfGridSize);
+
+
+                // if setting is enabled then draw the line, if not then do not draw the line segment
+                if (game.settings.get("rtscontrols", "drawPathLine")) {
+                    lineGraphics.lineTo(space.x * canvas.grid.size + halfGridSize, space.y * canvas.grid.size + halfGridSize);
+                } else {
+                }
             });
         }
     }
@@ -669,6 +815,8 @@ Hooks.on("pauseGame", (isPaused) => {
 
 async function findAlternativeDestinations(destination, gridSize, numTokens) {
     const alternatives = [];
+
+
     // Calculate a range based on the number of tokens, with a minimum value to ensure at least some alternatives are checked
     // The range is now directly proportional to the number of tokens
     const range = Math.min(numTokens, 3); // Limit the range to a maximum of 3 for example
@@ -681,7 +829,7 @@ async function findAlternativeDestinations(destination, gridSize, numTokens) {
             if (!isValidGridCoordinate(alternativeEnd)) continue;
             // Calculate the path from the alternative destination to the primary destination
             try {
-                const pathResult = await routinglib.calculatePath(alternativeEnd, destination, { interpolate: false });
+                const pathResult = await routinglib.calculatePath(alternativeEnd, destination, { interpolate: false});
                 if (pathResult && pathResult.path) {
                     alternatives.push({ position: alternativeEnd, cost: pathResult.cost });
                 }
