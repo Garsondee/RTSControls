@@ -221,6 +221,11 @@ class MovementManager {
             color: movementColor,
         };
 
+        // If the user is a GM then overide the 'isPaused' to always = false
+        if (game.user.isGM) {
+            movement.isPaused = false;
+        }
+
         this.movements.set(token.id, movement);
         console.log(`Movement object created for token ${token.name}:`, movement);
 
@@ -231,8 +236,8 @@ class MovementManager {
     }
 
     tick() {
-        // Check if the game is paused and return early if it is
-        if (game.paused) {
+        // If the game is paused and the user isn't a GM then return early
+        if (game.paused && !game.user.isGM) {
             console.log('Game is paused, skipping tick.');
             return;
         }
@@ -428,6 +433,13 @@ class MovementManager {
             console.log("Camera panning is disabled or path is empty.");
             return;
         }
+
+        // If the game is paused then return early unless the user is has GM access
+        if (game.paused && !game.user.isGM) {
+            ui.notifications.warn("Cannot pan camera while the game is paused.");
+            return;
+        }
+
 
         // Check if camera panning is allowed
         if (!this.allowCameraPanning) {
