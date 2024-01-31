@@ -110,10 +110,10 @@ async function findPath(start, end) {
     }
 
     // Use the start coordinates directly since they should already be in grid coordinates
-    const from = { x: start.x, y: start.y };
+    const from = {x: start.x, y: start.y};
 
     // Define the options object
-    const options = { interpolate: true, maxDistance: game.settings.get("rtscontrols", "maxPathfindDistance") }; // Now the pathfinder will emit a waypoint for every grid cell
+    const options = {interpolate: true, maxDistance: game.settings.get("rtscontrols", "maxPathfindDistance")}; // Now the pathfinder will emit a waypoint for every grid cell
 
     console.log(`Calculating path from (${from.x}, ${from.y}) to (${end.x}, ${end.y})`);
 
@@ -123,7 +123,7 @@ async function findPath(start, end) {
 
         if (pathResult && pathResult.path) {
             console.log(`Path found:`, pathResult.path);
-            return { path: pathResult.path, cost: pathResult.cost };
+            return {path: pathResult.path, cost: pathResult.cost};
         } else {
             console.warn(`No path or empty path found`);
             // Foundry VTT notification
@@ -158,7 +158,7 @@ class GridSpaceManager {
         const gridSize = canvas.grid.size;
         const fromX = Math.floor(token.x / gridSize);
         const fromY = Math.floor(token.y / gridSize);
-        return { x: fromX, y: fromY };
+        return {x: fromX, y: fromY};
     }
 
     // Override the isReserved method
@@ -361,7 +361,7 @@ class MovementManager {
             console.log("Cancelling camera pan");
 
             // Get the current camera (view) position
-            const { x, y } = canvas.stage.pivot;
+            const {x, y} = canvas.stage.pivot;
 
             // Instantly pan the camera to its current position, effectively stopping it
             canvas.animatePan({
@@ -422,9 +422,6 @@ class MovementManager {
             console.error(`Error moving token ${token.name}:`, err);
         }
     }
-
-
-
 
 
     // Method to pan the camera smoothly to a token's position
@@ -529,76 +526,89 @@ function distanceBetween(point1, point2) {
 }
 
 
-
 // Instantiate the Movement Manager
 const movementManager = new MovementManager();
 
-    // Event listener for right-click context menu to initiate token movement
-    document.addEventListener("contextmenu", async (event) => {
-        event.preventDefault();
+// Event listener for right-click context menu to initiate token movement
+document.addEventListener("contextmenu", async (event) => {
+    event.preventDefault();
 
-        // Reset the camera panning allowance
-        movementManager.allowCameraPanning = true;
+    // Reset the camera panning allowance
+    movementManager.allowCameraPanning = true;
 
-        // Return early if the setting is disabled
-        if (!game.settings.get("rtscontrols", "disableModule")) {
-            console.log("Token movement is disabled.");
-            return; // Exit the function early to avoid initiating token movement
-        }
+    // Return early if the setting is disabled
+    if (!game.settings.get("rtscontrols", "disableModule")) {
+        console.log("Token movement is disabled.");
+        return; // Exit the function early to avoid initiating token movement
+    }
 
+    // Translate the click position to canvas coordinates
+    const transform = canvas.app.stage.worldTransform;
+    const toX = (event.clientX - transform.tx) / canvas.stage.scale.x;
+    const toY = (event.clientY - transform.ty) / canvas.stage.scale.y;
 
-        // Check if the game is in combat mode
-        if (game.combat && game.combat.active) {
-            // Check the setting to see if right-click to move should be allowed in combat
-            if (!game.settings.get("rtscontrols", "allowRightClickCombat")) {
-                console.log("Game is in combat mode, right-click to move is disabled.");
-                ui.notifications.warn("Game is in combat mode, right-click to move is disabled by default.");
-                return; // Exit the function early to avoid initiating token movement
-            }
-        }
+    const toGridX = Math.floor(toX / canvas.grid.size);
+    const toGridY = Math.floor(toY / canvas.grid.size);
 
-        // Calculate the duration of the right-click
-        const clickDuration = Date.now() - rightClickStartTime;
-
-        // If the duration exceeds the threshold, it's considered a pan, not a click
-        if (clickDuration >= clickThreshold) {
-            console.log("Ignoring pan action for token movement.");
-            return; // Exit the function early to avoid initiating token movement
-        }
-
-        // Translate the click position to canvas coordinates
-        const transform = canvas.app.stage.worldTransform;
-        const toX = (event.clientX - transform.tx) / canvas.stage.scale.x;
-        const toY = (event.clientY - transform.ty) / canvas.stage.scale.y;
-
-        const toGridX = Math.floor(toX / canvas.grid.size);
-        const toGridY = Math.floor(toY / canvas.grid.size);
-
-        const selectedTokens = canvas.tokens.controlled;
-        if (selectedTokens.length === 0) return;
-
-        const gridSize = canvas.grid.size;
-        const destination = { x: toGridX, y: toGridY };
-
-        // Find alternative destinations for all tokens
-        const alternatives = await findAlternativeDestinations(destination, gridSize, selectedTokens.length);
-
-        // Calculate paths from each token's current location to the destination
-        for (let i = 0; i < selectedTokens.length; i++) {
-            const token = selectedTokens[i];
-            const start = gridSpaceManager.getGridSpaceFromToken(token); // Get the token's current grid space
-
-            // Use the clicked destination for the first token, or the best alternative destination for others
-            const targetDestination = (i < alternatives.length) ? alternatives[i].position : destination;
-
-            const pathResult = await findPath(start, targetDestination, gridSize);
-            if (pathResult && pathResult.path) {
-                movementManager.startMovement(token, pathResult.path);
-            } else {
-                console.warn(`No path found for token ${token.name} with ID ${token.id}`);
-            }
-        }
+    // Check if the right-click occurred on a token
+    const clickedToken = canvas.tokens.placeables.find(token => {
+        const tokenGridX = Math.floor(token.x / canvas.grid.size);
+        const tokenGridY = Math.floor(token.y / canvas.grid.size);
+        return toGridX === tokenGridX && toGridY === tokenGridY;
     });
+
+    // If a token was clicked, ignore the move action
+    if (clickedToken) {
+        console.log("Right-click on a token detected. Ignoring move action.");
+        return;
+    }
+
+
+    // Check if the game is in combat mode
+    if (game.combat && game.combat.active) {
+        // Check the setting to see if right-click to move should be allowed in combat
+        if (!game.settings.get("rtscontrols", "allowRightClickCombat")) {
+            console.log("Game is in combat mode, right-click to move is disabled.");
+            ui.notifications.warn("Game is in combat mode, right-click to move is disabled by default.");
+            return; // Exit the function early to avoid initiating token movement
+        }
+    }
+
+    // Calculate the duration of the right-click
+    const clickDuration = Date.now() - rightClickStartTime;
+
+    // If the duration exceeds the threshold, it's considered a pan, not a click
+    if (clickDuration >= clickThreshold) {
+        console.log("Ignoring pan action for token movement.");
+        return; // Exit the function early to avoid initiating token movement
+    }
+
+
+    const selectedTokens = canvas.tokens.controlled;
+    if (selectedTokens.length === 0) return;
+
+    const gridSize = canvas.grid.size;
+    const destination = {x: toGridX, y: toGridY};
+
+    // Find alternative destinations for all tokens
+    const alternatives = await findAlternativeDestinations(destination, gridSize, selectedTokens.length);
+
+    // Calculate paths from each token's current location to the destination
+    for (let i = 0; i < selectedTokens.length; i++) {
+        const token = selectedTokens[i];
+        const start = gridSpaceManager.getGridSpaceFromToken(token); // Get the token's current grid space
+
+        // Use the clicked destination for the first token, or the best alternative destination for others
+        const targetDestination = (i < alternatives.length) ? alternatives[i].position : destination;
+
+        const pathResult = await findPath(start, targetDestination, gridSize);
+        if (pathResult && pathResult.path) {
+            movementManager.startMovement(token, pathResult.path);
+        } else {
+            console.warn(`No path found for token ${token.name} with ID ${token.id}`);
+        }
+    }
+});
 
 // Event listeners for Foundry VTT's pause and resume game events
 Hooks.on("pauseGame", () => {
@@ -628,7 +638,7 @@ class GridSpaceCalculator {
         let err = dx - dy;
 
         while (true) {
-            path.push({ x: start.x, y: start.y });
+            path.push({x: start.x, y: start.y});
 
             if (start.x === end.x && start.y === end.y) break;
 
@@ -653,7 +663,7 @@ class GridSpaceCalculator {
         }
         const gridSpaces = [];
         for (let i = 0; i < waypoints.length - 1; i++) {
-            const segment = this.calculateLine({ ...waypoints[i] }, { ...waypoints[i + 1] });
+            const segment = this.calculateLine({...waypoints[i]}, {...waypoints[i + 1]});
             console.log(`Segment from ${JSON.stringify(waypoints[i])} to ${JSON.stringify(waypoints[i + 1])}:`, segment);
             gridSpaces.push(...segment);
         }
@@ -671,7 +681,7 @@ function getAdjacentGridSpaces(center, includeCenter = false) {
     for (let dx = -1; dx <= 1; dx++) {
         for (let dy = -1; dy <= 1; dy++) {
             if (dx !== 0 || dy !== 0 || includeCenter) {
-                adjacent.push({ x: center.x + dx, y: center.y + dy });
+                adjacent.push({x: center.x + dx, y: center.y + dy});
             }
         }
     }
@@ -685,7 +695,6 @@ class VisualManager {
     }
 
     drawPathLine(tokenId, gridSpaces, movementColor) {
-
 
 
         let lineGraphics = this.lineGraphicsMap.get(tokenId);
@@ -703,7 +712,6 @@ class VisualManager {
         const fadeLength = 5; // Number of segments to apply the fading effect to
 
 
-
         if (gridSpaces.length > 0) {
             const firstSpace = gridSpaces[0];
             lineGraphics.moveTo(firstSpace.x * canvas.grid.size + halfGridSize, firstSpace.y * canvas.grid.size + halfGridSize);
@@ -716,8 +724,7 @@ class VisualManager {
                 }
 
                 // Set the line style with the calculated alpha
-                lineGraphics.lineStyle({ width: 2, color: movementColor, alpha: segmentAlpha, alignment: 0.5 });
-
+                lineGraphics.lineStyle({width: 2, color: movementColor, alpha: segmentAlpha, alignment: 0.5});
 
 
                 // if setting is enabled then draw the line, if not then do not draw the line segment
@@ -836,14 +843,14 @@ async function findAlternativeDestinations(destination, gridSize, numTokens) {
     // Loop through a grid around the destination within the calculated range
     for (let dx = -range; dx <= range; dx++) {
         for (let dy = -range; dy <= range; dy++) {
-            const alternativeEnd = { x: destination.x + dx, y: destination.y + dy };
+            const alternativeEnd = {x: destination.x + dx, y: destination.y + dy};
             // Skip out-of-bounds locations
             if (!isValidGridCoordinate(alternativeEnd)) continue;
             // Calculate the path from the alternative destination to the primary destination
             try {
-                const pathResult = await routinglib.calculatePath(alternativeEnd, destination, { interpolate: false});
+                const pathResult = await routinglib.calculatePath(alternativeEnd, destination, {interpolate: false});
                 if (pathResult && pathResult.path) {
-                    alternatives.push({ position: alternativeEnd, cost: pathResult.cost });
+                    alternatives.push({position: alternativeEnd, cost: pathResult.cost});
                 }
             } catch (error) {
                 console.error(`Error calculating path to alternative destination: (${alternativeEnd.x}, ${alternativeEnd.y})`, error);
@@ -863,6 +870,6 @@ async function findAlternativeDestinations(destination, gridSize, numTokens) {
 
 // Helper function to check if a grid coordinate is valid
 function isValidGridCoordinate(coordinate) {
-    const { x, y } = coordinate;
+    const {x, y} = coordinate;
     return x >= 0 && x < canvas.grid.width && y >= 0 && y < canvas.grid.height;
 }
