@@ -32,6 +32,16 @@ Hooks.on("init", () => {
         default: true,
     });
 
+    // Create an option for pause cancelling all movement
+    game.settings.register("rtscontrols", "cancelAllMovement", {
+        name: "Pause Move Cancelling",
+        hint: "When the game pauses, cancel all movement",
+        scope: "client",
+        config: true,
+        type: Boolean,
+        default: false,
+    })
+
     // Allow right-click to move whilst in combat mode - default off
     game.settings.register("rtscontrols", "allowRightClickCombat", {
         name: "Combat Right Click to Move",
@@ -348,6 +358,14 @@ class MovementManager {
 
     // Method to pause movement for a specific token
     pauseMovement(tokenId) {
+
+        // If the game setting cancelAllMovement = true then cancel all movement
+        if (game.settings.get("rtscontrols", "cancelAllMovement")) {
+            this.cancelAllMovements();
+            return;
+        }
+
+
         const movement = this.movements.get(tokenId);
         if (movement) {
             movement.isPaused = true;
