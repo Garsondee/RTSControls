@@ -12,10 +12,10 @@ Hooks.on("init", () => {
         default: true,
     })
 
-    // Create a setting for disabling line drawing
+    // Create a setting for enabling line drawing
     game.settings.register("rtscontrols", "drawPathLine", {
-        name: "Disable Line Drawing",
-        hint: "Disable line drawing when the token moves.",
+        name: "Enable Line Drawing",
+        hint: "Enable line drawing when the token moves.",
         scope: "client",
         config: true,
         type: Boolean,
@@ -36,6 +36,16 @@ Hooks.on("init", () => {
     game.settings.register("rtscontrols", "cancelAllMovement", {
         name: "Pause Move Cancelling",
         hint: "When the game pauses, cancel all movement",
+        scope: "client",
+        config: true,
+        type: Boolean,
+        default: false,
+    })
+
+    // Only move a character when using Shift-Right-Click
+    game.settings.register("rtscontrols", "allowShiftRightClick", {
+        name: "Shift Right Click to Move",
+        hint: "Require hold shift + right-click to move.",
         scope: "client",
         config: true,
         type: Boolean,
@@ -443,18 +453,18 @@ class MovementManager {
 
 
     // Method to pan the camera smoothly to a token's position
+    // Method to pan the camera smoothly to a token's position
     async panCameraAlongPath(rawPath) {
         if (!this.allowCameraPanning || !game.settings.get("rtscontrols", "cameraPanning") || rawPath.length === 0) {
             console.log("Camera panning is disabled or path is empty.");
             return;
         }
 
-        // If the game is paused then return early unless the user is has GM access
+        // If the game is paused then return early unless the user has GM access
         if (game.paused && !game.user.isGM) {
             ui.notifications.warn("Cannot pan camera while the game is paused.");
             return;
         }
-
 
         // Check if camera panning is allowed
         if (!this.allowCameraPanning) {
@@ -472,13 +482,17 @@ class MovementManager {
         const gridSize = canvas.grid.size;
         let animations = []; // Array to hold promises for each animation
 
-        for (let i = 0; i < path.length; i++) {
+        // Determine the starting index for the loop
+        // Skip the first waypoint only if there are two or more waypoints
+        const startIndex = (path.length > 1) ? 1 : 0;
+
+        for (let i = startIndex; i < path.length; i++) {
             const point = path[i];
             const pixelX = (point.x * gridSize) + (gridSize / 2); // Center of the grid cell
             const pixelY = (point.y * gridSize) + (gridSize / 2);
 
-            // For the first point, pan immediately. For subsequent points, delay based on index.
-            const delay = i === 0 ? 0 : 3000; // Adjust delay as needed
+            // For the first point in our adjusted loop, pan immediately. For subsequent points, delay based on index.
+            const delay = (i === startIndex) ? 0 : 3000; // Adjust delay as needed
 
             // Wrap the animation in a promise and push it to the animations array
             let animationPromise = new Promise((resolve) => {
@@ -550,6 +564,13 @@ const movementManager = new MovementManager();
 // Event listener for right-click context menu to initiate token movement
 document.addEventListener("contextmenu", async (event) => {
     event.preventDefault();
+
+    // Check if allowShiftRightClick is true, then proceed only if Shift is also being held down
+    const allowShiftRightClick = game.settings.get("rtscontrols", "allowShiftRightClick");
+    if (allowShiftRightClick && !event.shiftKey) {
+        console.log("Shift-right-click is required but Shift key is not pressed.");
+        return; // Exit the function early if Shift is required but not pressed
+    }
 
     // Reset the camera panning allowance
     movementManager.allowCameraPanning = true;
