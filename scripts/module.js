@@ -1,914 +1,1046 @@
-// Hook for init event
-Hooks.on("init", () => {
-    console.log("RTS Controls initialized");
+/**
+ * RTS Controls - Right Click to Move
+ *
+ * The goal of this script is to the allow users to right-click to move a token or multiple tokens on either a gridded or gridless scene within
+ * Foundry VTT.
+ *
+ */
 
-    // Create a setting for disabling the whole module
-    game.settings.register("rtscontrols", "disableModule", {
-        name: "Enable Module",
-        hint: "Enable the entire module. This allows each user to turn the module off if they prefer the original movement controls.",
-        scope: "client",
-        config: true,
-        type: Boolean,
-        default: true,
-    })
+/**
+ *
+ * The `routinglib` utilizes a specific coordinate system for its operations, where coordinates are represented as objects containing `x` and `y` attributes. These attributes vary based on the scene type:
+ * - For gridded scenes (square and hex), `x` and `y` represent grid cells.
+ * - For gridless scenes, `x` and `y` are in pixels.
+ *
+ * `routinglib.calculatePath(from, to, options)` initiates an asynchronous pathfinding calculation from a start point (`from`) to an end point (`to`) with optional settings (`options`). It returns a promise that, upon resolution, provides details about the path:
+ * - `path`: An array of coordinates denoting the route, including start and end points.
+ * - `cost`: The length of the path, factoring in difficult terrain if applicable.
+ *
+ * Options:
+ * - `token`: Specify a token to consider its size, elevation, etc., during routing.
+ * - `ignoreTerrain` (default: false): Ignore terrain if set to true.
+ * - `elevation`: Set routing elevation, overriding the token's elevation if provided.
+ * - `maxDistance`: Limits the search to paths no longer than this value.
+ *
+ * Gridded pathfinder exclusive options:
+ * - `interpolate` (default: true): Minimizes waypoints unless set to false, which generates a waypoint for every grid cell traversed.
+ *
+ * To cancel an ongoing pathfinding operation for performance reasons, use `routinglib.cancelPathfinding(promise)`, passing the promise returned by `calculatePath`. The cancelled promise becomes invalid and will not resolve.
+ */
 
-    // Create a setting for enabling line drawing
-    game.settings.register("rtscontrols", "drawPathLine", {
-        name: "Enable Line Drawing",
-        hint: "Enable line drawing when the token moves.",
-        scope: "client",
-        config: true,
-        type: Boolean,
-        default: false,
-    })
+// Global Functions:
+function isCurrentSceneGridless() {
+    return canvas.scene.grid.type === 0;
+}
 
-    // Create a setting for the camera panning control
-    game.settings.register("rtscontrols", "cameraPanning", {
-        name: "Camera Panning",
-        hint: "Enable camera panning when the token moves.",
-        scope: "client",
-        config: true,
-        type: Boolean,
-        default: true,
-    });
+function isValidPoint(point) {
+    return point && typeof point.x === 'number' && typeof point.y === 'number';
+}
 
-    // Create an option for pause cancelling all movement
-    game.settings.register("rtscontrols", "cancelAllMovement", {
-        name: "Pause Move Cancelling",
-        hint: "When the game pauses, cancel all movement",
-        scope: "client",
-        config: true,
-        type: Boolean,
-        default: false,
-    })
-
-    // Only move a character when using Shift-Right-Click
-    game.settings.register("rtscontrols", "allowShiftRightClick", {
-        name: "Shift Right Click to Move",
-        hint: "Require hold shift + right-click to move.",
-        scope: "client",
-        config: true,
-        type: Boolean,
-        default: false,
-    })
-
-    // Allow right-click to move whilst in combat mode - default off
-    game.settings.register("rtscontrols", "allowRightClickCombat", {
-        name: "Combat Right Click to Move",
-        hint: "Allow right click to move while in combat mode.",
-        scope: "client",
-        config: true,
-        type: Boolean,
-        default: false,
-    })
-
-    // Setting for the destination circle colour with a dropdown menu
-    game.settings.register("rtscontrols", "destinationCircleColor", {
-        name: "Destination Circle Colour",
-        hint: "Set the colour of the destination circle by selecting a color name.",
-        scope: "client",
-        config: true,
-        type: String,
-        choices: {           // Defines the options in the select menu with human-readable names
-            "#ff0000": "Red",
-            "#00ff00": "Green",
-            "#0000ff": "Blue",
-            "#ffff00": "Yellow"
-        },
-        default: "Red", // Default value is the name of the color
-    });
-
-    // Setting for pathfinding distance called maxPathfindDistance
-    game.settings.register("rtscontrols", "maxPathfindDistance", {
-        name: "Maximum Pathfinding Distance",
-        hint: "Set the maximum distance in grid spaces for pathfinding. A lower value may prevent accidental misclicks from revealing parts of the map. A good middle value is 90.",
-        scope: "client",
-        config: true,
-        type: Number,
-        default: 90,
-    })
-
-
-});
-
-let rightClickStartTime = 0;
-const clickThreshold = 150; // milliseconds
-
-document.addEventListener("mousedown", (event) => {
-    // Check if the right mouse button was pressed
-    if (event.button === 2) {
-        rightClickStartTime = Date.now();
+function validatePath(path) {
+    if (!Array.isArray(path) || path.length === 0) {
+        console.error("Invalid path: Path is not an array or is empty.");
+        return false;
     }
-});
+    return path.every(isValidPoint);
+}
 
-document.addEventListener("mouseup", (event) => {
-    // Check if the right mouse button was released
-    if (event.button === 2) {
-        const clickDuration = Date.now() - rightClickStartTime;
-        if (clickDuration < clickThreshold) {
-            console.log("Detected a click");
-            // Handle click event here
-        } else {
-            console.log("Detected a pan");
-            // If a camera pan is in progress, attempt to cancel it
-            if (movementManager.isCameraPanning) {
-                movementManager.cancelCameraPan();
+class PathfindingModule {
+    constructor(gridSpaceManager) {
+        this.gridSpaceManager = gridSpaceManager;
+    }
+
+    async calculatePathInternal(from, to, options = {}) {
+        const isGridless = isCurrentSceneGridless();
+        console.log(`calculatePathInternal: Direct gridType check: ${canvas.scene.gridType}`);
+        console.log(`calculatePathInternal: calculatePathInternal called for a ${isGridless ? "gridless" : "gridded"} scene.`);
+        console.log(`calculatePathInternal: From (treated as ${isGridless ? "pixels" : "grid coordinates"}):`, from);
+        console.log(`calculatePathInternal: To (treated as ${isGridless ? "pixels" : "grid coordinates"}):`, to);
+        console.log("From:", from);
+        console.log("calculatePathInternal: To:", to);
+        console.log("calculatePathInternal: Options:", options);
+
+        try {
+            console.log("calculatePathInternal: Starting pathfinding operation...");
+            const pathResult = await routinglib.calculatePath(from, to, options);
+            console.log("calculatePathInternal: Raw pathfinding result:", pathResult);
+
+            if (pathResult) {
+                console.log("calculatePathInternal: Path details:");
+                console.log("calculatePathInternal: Path length:", pathResult.path.length);
+                console.log("calculatePathInternal: Path cost:", pathResult.cost);
+                console.log("calculatePathInternal: Path waypoints:", pathResult.path);
+            } else {
+                console.warn("calculatePathInternal: Pathfinding returned null or undefined result.");
+            }
+
+            return pathResult;
+        } catch (error) {
+            console.error("calculatePathInternal: Error during path calculation:", error);
+
+            if (error instanceof Error) {
+                console.error("calculatePathInternal: Error name:", error.name);
+                console.error("calculatePathInternal: Error message:", error.message);
+                if (error.stack) {
+                    console.error("calculatePathInternal: Error stack trace:", error.stack);
+                }
+            }
+            return null;
+        }
+    }
+
+    async findPathGridded(start, end, options = {}) {
+        console.log(`findPathGridded: Gridded Pathfinding: Pixel coordinates: x=${start.x}, y=${start.y}`);
+        console.log(`findPathGridded: Gridded Pathfinding: Grid coordinates: x=${start.gridX}, y=${start.gridY}`);
+
+        const pathfindingOptions = {
+            ...options, interpolate: false
+        };
+
+        const pathResult = await this.calculatePathInternal(start, end, pathfindingOptions);
+        return pathResult;
+    }
+
+    async findPathGridless(start, end, options = {}) {
+        console.log("findPathGridless: Starting gridless pathfinding...");
+        console.log(`findPathGridless: Gridless Pathfinding: Start coordinates: x=${start.x}, y=${start.y}`);
+        console.log(`findPathGridless: Gridless Pathfinding: End coordinates: x=${end.x}, y=${end.y}`);
+        console.log("findPathGridless: Initial pathfinding options:", options);
+
+        const pathfindingOptions = {
+            ...options, ignoreTerrain: false
+        };
+
+        console.log("findPathGridless: Adjusted pathfinding options to consider terrain and interpolation:", pathfindingOptions);
+
+        try {
+            console.log("findPathGridless: Invoking routinglib.calculatePath for gridless pathfinding...");
+
+            const pathResult = await routinglib.calculatePath(start, end, pathfindingOptions);
+
+            if (!pathResult) {
+                console.error("findPathGridless: No path found or pathfinding cancelled.");
+                return null;
+            }
+
+            // Interpolate the path for smoother movement in gridless scenes
+            if (pathResult && pathResult.path) {
+                pathResult.path = this.interpolatePathForGridless(pathResult.path);
+            }
+
+            console.log("findPathGridless: Path found:", pathResult.path);
+            console.log("findPathGridless: Path cost:", pathResult.cost);
+
+            return pathResult;
+        } catch (error) {
+            console.error("findPathGridless: Error during gridless path calculation:", error);
+            return null;
+        }
+    }
+
+    isValidGridCoordinate(coordinate) {
+        console.log("isValidGridCoordinate: Validating grid coordinate:", coordinate);
+        if (!canvas || !canvas.grid) {
+            console.warn("isValidGridCoordinate: Canvas or grid is not initialized.");
+            return false;
+        }
+        const {x, y} = coordinate;
+        return x >= 0 && x < canvas.grid.width && y >= 0 && y < canvas.grid.height;
+    }
+
+    async findAlternativeDestinations(destination, gridSize, numTokens) {
+        console.log("findAlternativeDestinations: Starting alternative destination search...");
+        console.log(`findAlternativeDestinations: Destination: x=${destination.x}, y=${destination.y}, gridSize=${gridSize}, numTokens=${numTokens}`);
+        const alternatives = [];
+        let firstResultSkipped = false; // Flag to indicate if the first result has been skipped
+
+        const range = Math.min(numTokens, 3); // Limit the range for example
+        for (let dx = -range; dx <= range; dx++) {
+            for (let dy = -range; dy <= range; dy++) {
+                const alternativeEnd = {
+                    x: destination.x + dx, y: destination.y + dy
+                };
+                if (!this.isValidGridCoordinate(alternativeEnd)) continue;
+                try {
+                    const pathResult = await this.findPathGridded(destination, alternativeEnd, {interpolate: false});
+                    if (pathResult && pathResult.path) {
+                        if (!firstResultSkipped) {
+                            // Skip the first result by setting the flag to true and continue to the next iteration
+                            firstResultSkipped = true;
+                            continue;
+                        }
+                        alternatives.push({
+                            position: alternativeEnd, cost: pathResult.cost
+                        });
+                    }
+                } catch (error) {
+                    console.error(`findAlternativeDestinations: Error calculating path to alternative destination: (${alternativeEnd.x}, ${alternativeEnd.y})`, error);
+                }
+            }
+        }
+
+        alternatives.sort((a, b) => a.cost - b.cost);
+        return alternatives.slice(1, numTokens);
+    }
+
+    async findAlternativeDestinationsGridless(centralDestination, tokens, options = {}) {
+        console.log("findAlternativeDestinationsGridless;: Starting alternative destination search...");
+        console.log("findAlternativeDestinationsGridless: Central destination:", centralDestination, "tokens:", tokens, "options:", options);
+        const {searchRadius = 25, baseAngleIncrement = 360 / tokens.length} = options;
+        const alternatives = [];
+        const extraDestinationsFactor = 2.5; // Factor to calculate extra destinations
+        const totalDestinations = Math.ceil(tokens.length * extraDestinationsFactor); // Total destinations including extras
+        const angleIncrement = 360 / totalDestinations; // Adjusted angle increment to accommodate extra destinations
+
+        // Ensure tokens are passed as an array to calculateGeometricCenter
+        const geometricCenter = this.calculateGeometricCenter(Array.isArray(tokens) ? tokens : [tokens]);
+
+        // Calculate alternative destinations including extra destinations
+        for (let i = 0; i < totalDestinations; i++) {
+            const angle = (angleIncrement * i) * (Math.PI / 180); // Convert degrees to radians
+            const tokenSizeOffset = this.calculateTokenSizeOffset(tokens[0]); // Assuming all tokens are of similar size
+            const x = centralDestination.x + (searchRadius + tokenSizeOffset) * Math.cos(angle);
+            const y = centralDestination.y + (searchRadius + tokenSizeOffset) * Math.sin(angle);
+
+            const alternativeDestination = {x, y};
+            alternatives.push({position: alternativeDestination, cost: Number.MAX_SAFE_INTEGER}); // Initialize with max cost
+        }
+
+        // Perform pathfinding for each alternative from the geometric center
+        for (const alternative of alternatives) {
+            try {
+                const pathResult = await this.findPathGridless(geometricCenter, alternative.position, {ignoreTerrain: false});
+                if (pathResult && pathResult.path) {
+                    alternative.cost = pathResult.cost;
+                    alternative.path = pathResult.path;
+                } else {
+                    alternative.cost = Number.MAX_SAFE_INTEGER; // Assign a high cost if no path is found
+                }
+            } catch (error) {
+                console.error("Error during pathfinding to alternative destination:", error);
+                alternative.cost = Number.MAX_SAFE_INTEGER;
+            }
+        }
+
+        // Sort alternatives by cost and return the best ones based on the original number of tokens
+        alternatives.sort((a, b) => a.cost - b.cost);
+        return alternatives.slice(0, tokens.length);
+    }
+
+    calculateTokenSizeOffset(token) {
+        // Calculate an offset based on the token size to prevent overlapping
+        // This is a simple approach and can be adjusted based on your needs
+        const averageSize = (token.w + token.h) / 1.8; // Average of width and height
+        return averageSize / 1.8; // Return half of the average size as the offset
+    }
+
+    calculateGeometricCenter(tokens) {
+        if (!Array.isArray(tokens) || tokens.length === 0) {
+            console.error("calculateGeometricCenter: Invalid or empty tokens array passed.");
+            return {x: 0, y: 0};
+        }
+
+        const sum = tokens.reduce((acc, token) => {
+            acc.x += token.x + token.w / 2; // Assuming token.x and token.w are the top-left corner and width of the token
+            acc.y += token.y + token.h / 2; // Assuming token.y and token.h are the top-left corner and height of the token
+            return acc;
+        }, {x: 0, y: 0});
+
+        return {
+            x: sum.x / tokens.length,
+            y: sum.y / tokens.length
+        };
+    }
+
+    calculateFormationPositions(tokens, destination) {
+        const formation = []; // Array to hold adjusted positions
+        const gridSize = game.settings.get("rtscontrols", "gridlessGridSize");
+        const formationWidth = Math.ceil(Math.sqrt(tokens.length)); // Simple grid width
+        const spacing = gridSize * 1.5; // Spacing between tokens
+
+        for (let i = 0; i < tokens.length; i++) {
+            const row = Math.floor(i / formationWidth);
+            const col = i % formationWidth;
+            const adjustedX = destination.x + (col - Math.floor(formationWidth / 2)) * spacing;
+            const adjustedY = destination.y + (row - Math.floor(tokens.length / formationWidth / 2)) * spacing;
+            formation.push({x: adjustedX, y: adjustedY});
+        }
+
+        return formation;
+    }
+
+    interpolatePathForGridless(path) {
+        const interpolatedPath = [];
+        const gridSize = game.settings.get("rtscontrols", "gridlessGridSize");
+
+        for (let i = 0; i < path.length - 1; i++) {
+            const start = path[i];
+            const end = path[i + 1];
+            interpolatedPath.push(start);
+
+            const dx = end.x - start.x;
+            const dy = end.y - start.y;
+            const distance = Math.sqrt(dx * dx + dy * dy);
+            const steps = Math.max(Math.floor(distance / gridSize), 1);
+
+            for (let step = 1; step < steps; step++) {
+                const interpolatedPoint = {
+                    x: start.x + (dx * step / steps),
+                    y: start.y + (dy * step / steps)
+                };
+                interpolatedPath.push(interpolatedPoint);
+            }
+        }
+
+        // Ensure the final point is always added
+        interpolatedPath.push(path[path.length - 1]);
+
+        return interpolatedPath;
+    }
+}
+
+class MovementManager {
+    constructor(gridSpaceManager, visualManager, cameraManager) {
+        this.movements = new Map(); // Maps token ID to movement data
+        this.tickInterval = null; // Interval for processing movements
+        this.gridSpaceManager = gridSpaceManager;
+        this.visualManager = visualManager;
+        this.cameraManager = cameraManager;
+        this.movementSpeed = game.settings.get("rtscontrols", "movementSpeed"); // Get the movement speed setting
+    }
+
+    startMovement(token, path) {
+        const movement = {
+            token: token, path: path, currentIndex: 0, isMoving: true, isPaused: false
+        };
+
+        this.movements.set(token.id, movement);
+
+        // Start following the token with the camera
+        if (game.settings.get("rtscontrols", "cameraPanning")) {
+            const selectedTokens = canvas.tokens.controlled;
+            if (selectedTokens.length > 0 && token.id === selectedTokens[0].id) {
+                this.cameraManager.panCameraToToken(token);
+            }
+        }
+
+        if (!this.tickInterval) {
+            this.tickInterval = setInterval(() => this.processMovementTicks(), this.movementSpeed); // Use the movement speed for the interval
+        }
+    }
+
+    async processMovementTicks() {
+        for (let [tokenId, movement] of this.movements) {
+            if (!movement.isMoving || movement.isPaused) continue;
+
+            if (movement.currentIndex < movement.path.length - 1) {
+                const nextIndex = movement.currentIndex + 1;
+                const nextPosition = movement.path[nextIndex];
+
+                await new Promise((resolve) => {
+                    this.moveToken(movement.token, nextPosition, resolve);
+                });
+
+                movement.currentIndex = nextIndex;
+
+                // Calculate progress and update path visibility
+                const progress = movement.currentIndex / (movement.path.length - 1);
+                this.visualManager.updatePathVisibility(tokenId, progress);
+
+                if (nextIndex === movement.path.length - 1) {
+                    this.stopMovement(tokenId);
+                }
             }
         }
     }
-});
 
-async function findPath(start, end) {
-    // Check if start and end are properly defined
-    if (!start || start.x === undefined || start.y === undefined) {
-        console.error('Invalid start object:', start);
-        return null;
+    moveToken(token, position, callback) {
+        console.log(`moveToken: Token: ${token.id}, Position: x=${position.x}, y=${position.y}`);
+        const isGridless = isCurrentSceneGridless();
+
+        let pixelPosition;
+        if (isGridless) {
+            // Calculate the center position for gridless scenes
+            pixelPosition = {
+                x: Math.round(position.x - token.w / 2), y: Math.round(position.y - token.h / 2)
+            };
+        } else {
+            pixelPosition = this.calculatePixelPosition(position, token);
+        }
+
+        token.document.update(pixelPosition).then(() => {
+            console.log(`moveToken: Token final position: x=${token.x}, y=${token.y}`);
+            if (callback) callback();
+        });
     }
-    if (!end || end.x === undefined || end.y === undefined) {
-        console.error('Invalid end object:', end);
-        return null;
+
+    calculatePixelPosition(position, token) {
+        const isGridless = isCurrentSceneGridless();
+        let pixelPosition;
+        if (isGridless) {
+            pixelPosition = this.gridSpaceManager.virtualGridToPixel(position);
+        } else {
+            const centerX = position.x * canvas.grid.size;
+            const centerY = position.y * canvas.grid.size;
+            pixelPosition = {
+                x: centerX, y: centerY,
+            };
+        }
+        console.log("calculatePixelPosition: Calculated pixel position", {position, pixelPosition, isGridless});
+        return pixelPosition;
     }
 
-    // Use the start coordinates directly since they should already be in grid coordinates
-    const from = {x: start.x, y: start.y};
+    stopMovement(tokenId) {
+        const movement = this.movements.get(tokenId);
+        if (movement) {
+            movement.isMoving = false;
+            console.log(`stopMovement: Stopping movement for token ${movement.token.name} with ID ${tokenId}`);
+            this.movements.delete(tokenId);
+            this.visualManager.clearPathLine(tokenId);
 
-    // Define the options object
-    const options = {interpolate: true, maxDistance: game.settings.get("rtscontrols", "maxPathfindDistance")}; // Now the pathfinder will emit a waypoint for every grid cell
+            if (this.movements.size === 0) {
+                clearInterval(this.tickInterval);
+                this.tickInterval = null;
+            }
+        }
 
-    console.log(`Calculating path from (${from.x}, ${from.y}) to (${end.x}, ${end.y})`);
+        // Stop following the token with the camera
+        this.cameraManager.stopFollowingToken();
+    }
 
-    try {
-        const pathResult = await routinglib.calculatePath(from, end, options);
-        console.log(`Path result:`, pathResult);
+    isTokenMoving(tokenId) {
+        return this.movements.has(tokenId) && this.movements.get(tokenId).isMoving;
+    }
+
+    updateMovement(token, newPath) {
+        // Check if the token is already moving
+        if (this.movements.has(token.id)) {
+            // Clear the existing path for the token
+            this.visualManager.clearPathLine(token.id);
+            // Update the movement with the new path
+            const movement = this.movements.get(token.id);
+            movement.path = newPath;
+            movement.currentIndex = 0; // Reset the index to start from the beginning of the new path
+            // Optionally, redraw the path if needed
+            this.visualManager.drawPathLine(token.id, newPath, "#00FF00"); // Example color: Green
+        } else {
+            // If the token is not already moving, start the movement normally
+            this.startMovement(token, newPath);
+        }
+    }
+
+    pauseAllMovements() {
+        this.movements.forEach((movement, tokenId) => {
+            movement.isPaused = true;
+        });
+        console.log('pauseAllMovements: All movements paused.');
+    }
+
+    resumeAllMovements() {
+        this.movements.forEach((movement, tokenId) => {
+            movement.isPaused = false;
+        });
+        console.log('resumeAllMovements: All movements resumed.');
+    }
+
+    cancelAllMovements() {
+        this.movements.forEach((_, tokenId) => this.stopMovement(tokenId));
+        console.log('cancelAllMovements: All movements cancelled.');
+    }
+}
+
+class VisualManager {
+    constructor() {
+        this.pathLineDrawings = new Map();
+    }
+
+    // Determine if the current scene is gridless
+    isCurrentSceneGridless() {
+        return canvas.scene.grid.type === 0;
+    }
+
+    normalizePoint(point) {
+        if (this.isCurrentSceneGridless()) {
+            // For gridless scenes, use the pixel coordinates directly without scaling
+            console.log("Gridless Scene Point Normalisation: (X and Y)", point.x, point.y);
+            return {x: point.x, y: point.y};
+        } else {
+            console.log("Gridded Scene Point Normalisation: (X and Y)", point.x, point.y);
+            return {
+                x: point.x * canvas.grid.size + canvas.grid.size / 2,
+                y: point.y * canvas.grid.size + canvas.grid.size / 2
+            };
+        }
+    }
+
+    normalizePath(path) {
+        return path.map(p => this.normalizePoint(p));
+    }
+
+    colorToHexString(color) {
+        if (typeof color === 'number') {
+            return '#' + color.toString(16).padStart(6, '0');
+        }
+        return color;
+    }
+
+    isValidPoint(point) {
+        return point && typeof point.x === 'number' && typeof point.y === 'number';
+    }
+
+    validatePath(path) {
+        if (!Array.isArray(path) || path.length === 0) {
+            console.error("Invalid path: Path is not an array or is empty.");
+            return false;
+        }
+        return path.every(p => this.isValidPoint(p));
+    }
+
+    async drawPathLine(tokenId, path, color = game.settings.get("rtscontrols", "destinationCircleColor")) {
+        if (!this.validatePath(path)) {
+            console.error("drawPathLine: Invalid path data.");
+            return;
+        }
+
+        const normalizedPath = this.normalizePath(path);
+        const strokeColor = game.settings.get("rtscontrols", "destinationCircleColor");
+        const points = normalizedPath.flatMap(p => [p.x, p.y]);
+
+        const drawingData = {
+            type: "p",
+            author: game.user.id,
+            x: 0, y: 0,
+            strokeWidth: 3,
+            strokeColor: strokeColor,
+            strokeAlpha: 1.0,
+            fillColor: "#00000000",
+            fillAlpha: 0.0,
+            points: points,
+            texture: "",
+            hidden: false,
+            locked: true
+        };
+
+        try {
+            const createdDrawing = await DrawingDocument.create(drawingData, {parent: canvas.scene});
+            this.pathLineDrawings.set(tokenId, createdDrawing.id);
+            // Draw a circle at the endpoint
+            await this.drawCircleAtEndpoint(tokenId, normalizedPath[normalizedPath.length - 1], color);
+        } catch (error) {
+            console.error("Error creating path line drawing:", error);
+        }
+    }
+
+    async drawCircleAtEndpoint(tokenId, endpoint, color = game.settings.get("rtscontrols", "destinationCircleColor")) {
+        const circleData = {
+            type: "e", // Ellipse type
+            author: game.user.id,
+            x: endpoint.x - ((canvas.grid.size / 2) / 2),
+            y: endpoint.y - ((canvas.grid.size / 2) / 2),
+            width: 50, // Adjust size as needed
+            height: 50, // Adjust size as needed
+            strokeColor: game.settings.get("rtscontrols", "destinationCircleColor"),
+            strokeAlpha: 1.0,
+            strokeWidth: 25,
+            fillColor: game.settings.get("rtscontrols", "destinationCircleColor"),
+            fillAlpha: 1.0,
+            hidden: false,
+            locked: true
+        };
+
+        try {
+            const createdCircle = await DrawingDocument.create(circleData, {parent: canvas.scene});
+            // Optionally, store the circle's ID if you need to reference it later
+            this.pathLineDrawings.set(tokenId + "_circle", createdCircle.id);
+        } catch (error) {
+            console.error("Error creating endpoint circle:", error);
+        }
+    }
+
+    updatePathVisibility(tokenId, progress) {
+        const drawingId = this.pathLineDrawings.get(tokenId);
+        if (!drawingId) return;
+
+        const drawing = canvas.drawings.get(drawingId);
+        if (!drawing) return;
+
+        // Calculate new alpha based on progress
+        const newAlpha = Math.max(1 - progress, 0);
+
+        // Update the drawing's stroke alpha
+        drawing.document.update({strokeAlpha: newAlpha}).catch(console.error);
+    }
+
+    async clearPathLine(tokenId) {
+        // Attempt to delete the line drawing
+        const lineDrawingId = this.pathLineDrawings.get(tokenId);
+        if (lineDrawingId) {
+            await canvas.scene.deleteEmbeddedDocuments('Drawing', [lineDrawingId]);
+            this.pathLineDrawings.delete(tokenId);
+        }
+
+        // Attempt to delete the circle drawing
+        const circleDrawingId = this.pathLineDrawings.get(tokenId + "_circle");
+        if (circleDrawingId) {
+            await canvas.scene.deleteEmbeddedDocuments('Drawing', [circleDrawingId]);
+            this.pathLineDrawings.delete(tokenId + "_circle");
+        }
+    }
+
+    async clearAllVisuals() {
+        for (let drawingId of this.pathLineDrawings.values()) {
+            await DrawingDocument.deleteDocuments([drawingId]);
+        }
+        this.pathLineDrawings.clear();
+
+        console.log("clearAllVisuals: Cleared all path lines and destination circles.");
+    }
+}
+
+class SettingsManager {
+    constructor() {
+        this.namespace = "rtscontrols";
+    }
+
+    getSetting(key) {
+        return game.settings.get(this.namespace, key);
+    }
+
+    setSetting(key, value) {
+        return game.settings.set(this.namespace, key, value);
+    }
+
+    registerSettings() {
+        game.settings.register("rtscontrols", "disableModule", {
+            name: "Enable Module",
+            hint: "Enable the entire module. This allows each user to turn the module off if they prefer the original movement controls.",
+            scope: "client",
+            config: true,
+            type: Boolean,
+            default: true,
+        })
+
+        game.settings.register("rtscontrols", "drawPathLine", {
+            name: "Enable Line Drawing",
+            hint: "Enable line drawing when the token moves.",
+            scope: "client",
+            config: true,
+            type: Boolean,
+            default: false,
+        })
+
+        game.settings.register("rtscontrols", "cameraPanning", {
+            name: "Camera Panning",
+            hint: "Enable camera panning when the token moves.",
+            scope: "client",
+            config: true,
+            type: Boolean,
+            default: true,
+        })
+
+        game.settings.register("rtscontrols", "cancelAllMovement", {
+            name: "Pause Move Cancelling",
+            hint: "When the game pauses, cancel all movement",
+            scope: "world", // Changed to world scope
+            config: true,
+            type: Boolean,
+            default: false,
+        });
+
+        game.settings.register("rtscontrols", "allowShiftRightClick", {
+            name: "Shift Right Click to Move",
+            hint: "Require hold shift + right-click to move.",
+            scope: "client",
+            config: true,
+            type: Boolean,
+            default: false,
+        })
+
+        game.settings.register("rtscontrols", "allowRightClickCombat", {
+            name: "Combat Right Click to Move",
+            hint: "Allow right click to move while in combat mode.",
+            scope: "world", // Changed to world scope
+            config: true,
+            type: Boolean,
+            default: false,
+        });
+
+        game.settings.register("rtscontrols", "destinationCircleColor", {
+            name: "Destination Circle Colour",
+            hint: "Set the colour of the destination circle by selecting a color name.",
+            scope: "client",
+            config: true,
+            type: String,
+            choices: {
+                "#ff0000": "Red",
+                "#00ff00": "Green",
+                "#0000ff": "Blue",
+                "#ffff00": "Yellow",
+                "#ff00ff": "Magenta",
+                "#00ffff": "Cyan",
+                "#ffffff": "White",
+                "#000000": "Black",
+                "#ff8000": "Orange",
+                "#800080": "Purple",
+                "#808080": "Grey",
+                "#008000": "Dark Green"
+            },
+            default: "#ff0000", // Default to Red
+        });
+
+        game.settings.register("rtscontrols", "maxPathfindDistance", {
+            name: "Maximum Pathfinding Distance",
+            hint: "Set the maximum distance in grid spaces for pathfinding. A lower value may prevent accidental misclicks from revealing parts of the map. A good middle value is 90.",
+            scope: "client",
+            config: true,
+            type: Number,
+            default: 90,
+        })
+
+        game.settings.register("rtscontrols", "gridlessGridSize", {
+            name: "Gridless Grid Size",
+            hint: "On a gridless scene this setting determines how far a token moves in a single step. If you set this very low it will be like an RTS game with incremental movement. If you have a gridless scene but want the tokens to move like they are on a virtual grid increase this value. Experiment with this setting and the token movement speed to get the best balance.",
+            scope: "client",
+            config: true,
+            type: Number,
+            default: 50,
+        })
+
+        game.settings.register("rtscontrols", "movementSpeed", {
+            name: "Token Movement Speed",
+            hint: "Set the speed at which tokens move. Changing this setting requires a reload to take effect.",
+            scope: "world", // Changed to world scope
+            config: true,
+            type: String,
+            choices: {
+                "300": "Normal",
+                "400": "Slow",
+                "500": "Very Slow",
+                "600": "Extremely Slow",
+                "700": "Glacial",
+                "800": "Continental Drift",
+                "900": "Cautious Adventurers",
+                "1000": "Traps Around Every Corner",
+            },
+            default: "400", // Default to Normal speed
+            onChange: value => {
+                ui.notifications.info("Movement speed setting changed. Please reload your application for the change to take effect.", {permanent: true});
+                window.location.reload();
+            }
+        });
+    }
+}
+
+class EventManager {
+    constructor(pathfindingModule, movementManager, visualManager, settingsManager) {
+        this.pathfindingModule = pathfindingModule;
+        this.movementManager = movementManager;
+        this.visualManager = visualManager;
+        this.settingsManager = settingsManager;
+        this.cameraManager = movementManager.cameraManager;
+
+        this.rightClickStartTime = 0;
+        this.clickThreshold = 150; // milliseconds
+
+        this.initializeEventListeners();
+        this.initializeHooks();
+    }
+
+    initializeHooks() {
+        Hooks.on("pauseGame", this.handleGamePause.bind(this));
+        Hooks.on("resumeGame", this.handleGameResume.bind(this));
+    }
+
+    handleGamePause(isPaused) {
+        if (isPaused) {
+            const cancelAllMovementOnPause = this.settingsManager.getSetting("cancelAllMovement");
+            console.log(`handleGamePause: Cancel all movement on pause setting: ${cancelAllMovementOnPause}`);
+            if (cancelAllMovementOnPause) {
+                console.log('handleGamePause: Cancelling all movements due to game pause.');
+                this.movementManager.cancelAllMovements();
+            } else {
+                console.log('handleGamePause: Pausing all movements.');
+                this.movementManager.pauseAllMovements();
+            }
+        } else {
+            console.log('handleGamePause: Game resumed, checking if movements need to be resumed.');
+            this.movementManager.resumeAllMovements();
+        }
+    }
+
+    handleGameResume() {
+        console.log('Game resumed, resuming all movements.');
+        this.movementManager.resumeAllMovements();
+    }
+
+    initializeEventListeners() {
+        canvas.app.view.addEventListener("contextmenu", this.handleRightClick.bind(this));
+        document.addEventListener("mousedown", this.handleMouseDown.bind(this));
+        document.addEventListener("mouseup", this.handleMouseUp.bind(this));
+        document.addEventListener("keydown", this.handleKeyDown.bind(this));
+    }
+
+    handleMouseDown(event) {
+        if (event.button === 2) { // Right-click
+            this.rightClickStartTime = Date.now();
+        }
+    }
+
+    handleMouseUp(event) {
+
+        if (event.button === 2) { // Right-click
+            const clickDuration = Date.now() - this.rightClickStartTime;
+            if (clickDuration >= this.clickThreshold) {
+                console.log("Detected a pan");
+                this.cameraManager.cancelCameraPan();
+            }
+        }
+    }
+
+    handleKeyDown(event) {
+        if (event.key === "Escape") {
+            console.log('Escape key pressed, canceling all movements and clearing destination circles.');
+            this.movementManager.cancelAllMovements();
+            this.cameraManager.cancelCameraPan();
+            this.visualManager.clearAllVisuals(); // Clear all destination circles
+        }
+    }
+
+    async handleRightClick(event) {
+        event.preventDefault();
+
+        if (!this.settingsManager.getSetting("disableModule")) {
+            console.log("Token movement is disabled.");
+            return;
+        }
+
+        const allowShiftRightClick = this.settingsManager.getSetting("allowShiftRightClick");
+        if (allowShiftRightClick && !event.shiftKey) {
+            console.log("Shift-right-click is required but Shift key is not pressed.");
+            return;
+        }
+
+        const transform = canvas.app.stage.worldTransform;
+        const mouseX = (event.clientX - transform.tx) / canvas.stage.scale.x;
+        const mouseY = (event.clientY - transform.ty) / canvas.stage.scale.y;
+
+        const isGridless = isCurrentSceneGridless();
+
+        const selectedTokens = canvas.tokens.controlled;
+        if (selectedTokens.length === 0) return;
+
+        // Check for a clicked token to ignore move action
+        const clickedToken = canvas.tokens.placeables.find(t => {
+            const tokenBounds = t.getBounds();
+            return event.clientX >= tokenBounds.x && event.clientX <= tokenBounds.x + tokenBounds.width && event.clientY >= tokenBounds.y && event.clientY <= tokenBounds.y + tokenBounds.height;
+        });
+
+        if (clickedToken) {
+            console.log("Right-click on a token detected. Ignoring move action.");
+            return;
+        }
+
+        if (game.combat && game.combat.active && !this.settingsManager.getSetting("allowRightClickCombat")) {
+            console.log("Game is in combat mode, right-click to move is disabled.");
+            ui.notifications.warn("Game is in combat mode, right-click to move is disabled by default.");
+            return;
+        }
+
+        // Calculate the central destination for the formation
+        let centralDestination = {x: mouseX, y: mouseY};
+        if (!isGridless) {
+            centralDestination = {
+                x: Math.floor(mouseX / canvas.grid.size), y: Math.floor(mouseY / canvas.grid.size)
+            };
+        }
+
+        // If multiple tokens are selected, find alternative destinations
+        if (selectedTokens.length > 1) {
+            let alternatives;
+            if (isGridless) {
+                // Adjust the call to findAlternativeDestinationsGridless to account for one less alternative needed
+                alternatives = await this.pathfindingModule.findAlternativeDestinationsGridless(centralDestination, selectedTokens.slice(1), {searchRadius: 50});
+            } else {
+                const gridSize = game.settings.get("rtscontrols", "gridlessGridSize");
+                alternatives = await this.pathfindingModule.findAlternativeDestinations(centralDestination, gridSize, selectedTokens.length);
+            }
+
+            // Move the first token to the centralDestination directly
+            await this.initiateTokenMovement(selectedTokens[0], centralDestination);
+
+            // Move the rest of the tokens to their respective alternative destinations
+            for (let i = 1; i < selectedTokens.length; i++) {
+                const token = selectedTokens[i];
+                // Use the (i-1)th alternative destination since the first token doesn't need one
+                const alternativeDestination = alternatives[i - 1] ? alternatives[i - 1].position : centralDestination; // Use alternative if available
+                console.log(`Moving token to alternative destination at (${alternativeDestination.x}, ${alternativeDestination.y})`);
+                await this.initiateTokenMovement(token, alternativeDestination);
+            }
+        } else if (selectedTokens.length === 1) {
+            // If only one token is selected, move it to the centralDestination
+            await this.initiateTokenMovement(selectedTokens[0], centralDestination);
+        }
+    }
+
+    async initiateTokenMovement(token, destination) {
+        let start;
+        const isGridless = isCurrentSceneGridless();
+
+        if (isGridless) {
+            // Calculate the start position from the token's center in gridless scenes
+            start = {x: token.x + token.w / 2, y: token.y + token.h / 2};
+        } else {
+            // For gridded scenes, calculate the start position based on grid coordinates
+            start = {x: Math.floor(token.x / canvas.grid.size), y: Math.floor(token.y / canvas.grid.size)};
+        }
+
+        console.log(`initiateTokenMovement: Scene Type: ${isGridless ? "Gridless" : "Gridded"}`);
+        console.log(`initiateTokenMovement: Start Position: x=${start.x}, y=${start.y}`);
+        console.log(`initiateTokenMovement: Destination: x=${destination.x}, y=${destination.y}`);
+
+        const options = {
+            ignoreTerrain: false,
+        };
+
+        let pathResult;
+        if (isGridless) {
+            pathResult = await this.pathfindingModule.findPathGridless(start, destination, options);
+        } else {
+            pathResult = await this.pathfindingModule.findPathGridded(start, destination, options);
+        }
 
         if (pathResult && pathResult.path) {
-            console.log(`Path found:`, pathResult.path);
-            return {path: pathResult.path, cost: pathResult.cost};
+            // Check if the token is already moving and update its path if so
+            if (this.movementManager.isTokenMoving(token.id)) {
+                // Update the movement with the new path
+                this.movementManager.updateMovement(token, pathResult.path);
+            } else {
+                // If the token is not already moving, start the movement normally
+                this.movementManager.startMovement(token, pathResult.path);
+                // Draw path line and destination circle
+                await this.visualManager.drawPathLine(token.id, pathResult.path, "#00FF00"); // Example color: Green
+            }
         } else {
-            console.warn(`No path or empty path found`);
-            // Foundry VTT notification
-            ui.notifications.warn(`Either there is no path or the path is too long. Try increase max distance in settings if this move should be possible.`);
-
-
-            return null;
+            console.warn(`initiateTokenMovement: No path found for token ${token.name} with ID ${token.id}`);
         }
-    } catch (error) {
-        console.error(`Error during path calculation:`, error);
-        return null;
+    }
+}
+
+class CameraManager {
+    constructor(movementManager) {
+        this.movementManager = movementManager;
+        this.isCameraPanning = false;
+        this.allowCameraPanning = true;
+        this.followInterval = null; // Interval for following the token
+    }
+
+    // Modified method to start following a moving token
+    startFollowingToken(token) {
+        const isGridless = isCurrentSceneGridless();
+
+        if (isGridless) {
+            return;
+        }
+
+
+        if (this.followInterval) {
+            clearInterval(this.followInterval);
+        }
+
+        this.followInterval = setInterval(() => {
+            if (!this.allowCameraPanning || !token || !this.movementManager.isTokenMoving(token.id)) {
+                this.stopFollowingToken();
+                return;
+            }
+
+            // Access the token's path and current index from the MovementManager
+            const movement = this.movementManager.movements.get(token.id);
+            if (!movement || movement.currentIndex >= movement.path.length - 1) {
+                // If the movement is not found or the token is at the end of its path, stop following
+                this.stopFollowingToken();
+                return;
+            }
+
+            let nextIndex;
+            let nextPosition;
+
+            if (isGridless) {
+                // In gridless scenes, follow the token more closely
+                nextIndex = movement.currentIndex + 1; // Follow the next immediate position
+            } else {
+                // In gridded scenes, anticipate the token's future position
+                const lookaheadSteps = 6; // Adjust this value as needed
+                nextIndex = movement.currentIndex + lookaheadSteps;
+                if (nextIndex >= movement.path.length) {
+                    // Ensure we don't exceed the path length
+                    nextIndex = movement.path.length - 1;
+                }
+            }
+
+            nextPosition = movement.path[nextIndex];
+
+            // Convert the next position to canvas coordinates if necessary
+            const anticipatedPosition = this.movementManager.calculatePixelPosition(nextPosition, token);
+
+            canvas.animatePan({
+                x: anticipatedPosition.x,
+                y: anticipatedPosition.y,
+                duration: isGridless ? 500 : 1000, // Faster transition in gridless scenes
+            });
+        }, isCurrentSceneGridless() ? 500 : 2000); // Update camera position more frequently in gridless scenes
+    }
+
+    // New method to stop following the token
+    stopFollowingToken() {
+        if (this.followInterval) {
+            clearInterval(this.followInterval);
+            this.followInterval = null;
+        }
+    }
+
+    panCameraToToken(token) {
+        this.startFollowingToken(token); // Start following the token instead of a single pan
+    }
+
+    cancelCameraPan() {
+        this.allowCameraPanning = false;
+        setTimeout(() => this.allowCameraPanning = true, 500);
     }
 }
 
 class GridSpaceManager {
     constructor() {
-        this.reservations = new Map(); // key: gridSpace JSON string, value: {tokenId, tick}
+        this.virtualGridSize = game.settings.get("rtscontrols", "gridlessGridSize"); // Assuming this setting is already registered
     }
 
-    reserveSpace(gridSpace, tokenId, tick) {
-        //    const key = JSON.stringify(gridSpace);
-        // this.reservations.set(key, { tokenId, tick });
-    }
-
-    releaseSpace(gridSpace) {
-        const key = JSON.stringify(gridSpace);
-        this.reservations.delete(key);
-    }
-
-    getGridSpaceFromToken(token) {
-        console.log(`Token pixel coordinates: x=${token.x}, y=${token.y}`);
-        const gridSize = canvas.grid.size;
-        const fromX = Math.floor(token.x / gridSize);
-        const fromY = Math.floor(token.y / gridSize);
-        return {x: fromX, y: fromY};
-    }
-
-    // Override the isReserved method
-    isReserved(gridSpace, tokenId, tick) {
-        const key = JSON.stringify(gridSpace);
-        const reservation = this.reservations.get(key);
-        console.log(`Checking reservation for space ${key}:`, reservation);
-        // Check if the space is reserved by a different token or at a future tick
-        const isReserved = reservation && (reservation.tokenId !== tokenId && tick < reservation.tick);
-        console.log(`Space ${key} is reserved: ${isReserved}`);
-        return isReserved;
-    }
-}
-
-const gridSpaceManager = new GridSpaceManager();
-
-class MovementManager {
-    constructor() {
-        this.movements = new Map();
-        this.tickRate = 500;
-        this.tickInterval = null;
-        this.isCameraPanning = false; // Track camera panning state
-        this.allowCameraPanning = true; // New flag to control camera panning
-    }
-
-    startMovement(token, path) {
-        console.log(`Path to be calculated for token ${token.name}:`, path);
-        console.log('Selected token:', token);
-        console.log(`Starting movement for token ${token.name} with ID ${token.id}`);
-
-        // Calculate all grid spaces for the path
-        const gridSpaces = GridSpaceCalculator.calculateGridSpacesForPath(path);
-        console.log(`Calculated grid spaces for token ${token.name}:`, gridSpaces);
-
-        if (gridSpaces.length === 0) {
-            console.warn(`No grid spaces to move to for token ${token.name} with ID ${token.id}`);
-            return;
-        }
-
-        gridSpaces.forEach((space, index) => {
-            console.log(`Reserving space for token ${token.name} at index ${index}:`, space);
-            gridSpaceManager.reserveSpace(space, token.id, index);
-        });
-
-        const destination = path[path.length - 1];
-        const movementColor = 0xff0000;
-        visualManager.drawPathLine(token.id, gridSpaces, movementColor);
-        visualManager.drawDestinationCircle(token.id, destination, movementColor);
-
-        // Initiate camera pan to the destination
-        this.panCameraAlongPath(path);
-
-        const movement = {
-            token: token,
-            gridSpaces: gridSpaces,
-            currentIndex: 0,
-            isMoving: true,
-            isPaused: false,
-            destination: destination,
-            color: movementColor,
+    virtualGridToPixel(gridPosition) {
+        return {
+            x: gridPosition.x * this.virtualGridSize, y: gridPosition.y * this.virtualGridSize
         };
-
-        // If the user is a GM then overide the 'isPaused' to always = false
-        if (game.user.isGM) {
-            movement.isPaused = false;
-        }
-
-        this.movements.set(token.id, movement);
-        console.log(`Movement object created for token ${token.name}:`, movement);
-
-        if (!this.tickInterval) {
-            console.log('Starting tick interval');
-            this.tickInterval = setInterval(() => this.tick(), this.tickRate);
-        }
-    }
-
-    tick() {
-        // If the game is paused and the user isn't a GM then return early
-        if (game.paused && !game.user.isGM) {
-            console.log('Game is paused, skipping tick.');
-            return;
-        }
-
-        // Create a map to track grid spaces that will be occupied in this tick
-        const spacesToOccupy = new Map();
-
-        // First pass: Check for conflicts without moving any tokens
-        this.movements.forEach((movement, tokenId) => {
-            if (!movement.isMoving || movement.isPaused) {
-                return;
-            }
-
-            const nextIndex = movement.currentIndex + 1;
-            if (nextIndex < movement.gridSpaces.length) {
-                const nextGridSpace = movement.gridSpaces[nextIndex];
-                const spaceKey = JSON.stringify(nextGridSpace);
-
-                if (spacesToOccupy.has(spaceKey)) {
-                    // Conflict detected, decide which token waits
-                    const conflictingTokenId = spacesToOccupy.get(spaceKey);
-                    const chosenTokenId = Math.random() < 0.5 ? tokenId : conflictingTokenId;
-
-                    // The chosen token will wait for one tick
-                    if (chosenTokenId === tokenId) {
-                        console.log(`Token ${movement.token.name} with ID ${tokenId} will wait for one tick due to conflict.`);
-                        movement.isPaused = true; // Pause the chosen token for one tick
-                    } else {
-                        const otherMovement = this.movements.get(conflictingTokenId);
-                        console.log(`Token ${otherMovement.token.name} with ID ${conflictingTokenId} will wait for one tick due to conflict.`);
-                        otherMovement.isPaused = true; // Pause the other token for one tick
-                    }
-                } else {
-                    // No conflict, mark the space to be occupied
-                    spacesToOccupy.set(spaceKey, tokenId);
-                }
-            }
-        });
-
-        // Second pass: Move tokens that are not paused
-        this.movements.forEach((movement, tokenId) => {
-            if (!movement.isMoving || movement.isPaused) {
-                if (movement.isPaused) {
-                    movement.isPaused = false;
-                }
-                return;
-            }
-
-            const currentGridSpace = movement.gridSpaces[movement.currentIndex];
-            this.moveToken(movement.token, currentGridSpace);
-            movement.currentIndex++;
-
-            if (movement.currentIndex >= movement.gridSpaces.length) {
-                this.stopMovement(tokenId);
-            } else {
-                const remainingGridSpaces = movement.gridSpaces.slice(movement.currentIndex);
-                visualManager.updatePathLine(tokenId, remainingGridSpaces);
-            }
-        });
-    }
-
-    // Method to resolve conflicts when two tokens are on the same grid space
-    resolveOverlapConflict(tokenId) {
-        const movement = this.movements.get(tokenId);
-        if (!movement) return;
-
-        const currentGridSpace = movement.gridSpaces[movement.currentIndex];
-        const tokensAtSameSpace = canvas.tokens.placeables.filter(t => {
-            const tokenGridSpace = gridSpaceManager.getGridSpaceFromToken(t);
-            return tokenGridSpace.x === currentGridSpace.x && tokenGridSpace.y === currentGridSpace.y;
-        });
-
-        if (tokensAtSameSpace.length > 1) {
-            // Find an unoccupied adjacent space
-            const adjacentSpaces = getAdjacentGridSpaces(currentGridSpace);
-            for (const space of adjacentSpaces) {
-                if (!gridSpaceManager.isReserved(space, tokenId, Number.MAX_SAFE_INTEGER)) {
-                    // Move the token to the unoccupied space
-                    this.moveToken(movement.token, space);
-                    console.log(`Moved token ${movement.token.name} to resolve overlap at space ${JSON.stringify(space)}`);
-                    break;
-                }
-            }
-        }
-    }
-
-    stopMovement(tokenId) {
-        const movement = this.movements.get(tokenId);
-        if (movement && movement.isMoving) {
-            movement.isMoving = false;
-
-            // Clear the path line
-            visualManager.clearPathLine(tokenId);
-
-            // Check if the token has reached its destination before clearing the destination circle
-            if (movement.currentIndex >= movement.gridSpaces.length - 1) {
-                visualManager.clearDestinationCircle(tokenId);
-            }
-
-            console.log(`Stopping movement for token ${movement.token.name} with ID ${tokenId}`);
-
-            this.movements.delete(tokenId);
-            this.resolveOverlapConflict(tokenId);
-
-            this.allowCameraPanning = true;
-        }
-    }
-
-    // Method to pause movement for a specific token
-    pauseMovement(tokenId) {
-
-        // If the game setting cancelAllMovement = true then cancel all movement
-        if (game.settings.get("rtscontrols", "cancelAllMovement")) {
-            this.cancelAllMovements();
-            return;
-        }
-
-
-        const movement = this.movements.get(tokenId);
-        if (movement) {
-            movement.isPaused = true;
-            console.log(`Paused movement for token with ID ${tokenId}`);
-        }
-    }
-
-    // Method to cancel camera pan
-    cancelCameraPan() {
-        if (this.isCameraPanning) {
-            console.log("Cancelling camera pan");
-
-            // Get the current camera (view) position
-            const {x, y} = canvas.stage.pivot;
-
-            // Instantly pan the camera to its current position, effectively stopping it
-            canvas.animatePan({
-                x: x,
-                y: y,
-                duration: 0 // Instantly apply the pan without animation
-            });
-
-            // Reset the camera panning flag
-            this.isCameraPanning = false;
-
-            // Keep camera panning disabled
-            this.allowCameraPanning = false;
-        }
-    }
-
-    // Method to resume movement for a specific token
-    resumeMovement(tokenId) {
-        const movement = this.movements.get(tokenId);
-        if (movement) {
-            movement.isPaused = false;
-            console.log(`Resumed movement for token with ID ${tokenId}`);
-        }
-    }
-
-    cancelAllMovements() {
-        this.movements.forEach((_, tokenId) => {
-            this.stopMovement(tokenId);
-        });
-        visualManager.clearAllDestinationCircles(); // Clear all destination circles
-    }
-
-    // Moves the token to the specified position
-    async moveToken(token, position) {
-        const updateData = {
-            x: position.x * canvas.grid.size,
-            y: position.y * canvas.grid.size
-        };
-
-        const tokenDocument = token.document;
-
-        try {
-            await tokenDocument.update(updateData);
-            console.log(`Token ${token.name} moved to (${position.x}, ${position.y})`);
-
-            const movement = this.movements.get(token.id);
-            if (movement) {
-                const previousIndex = movement.currentIndex - 1;
-                if (previousIndex >= 0) {
-                    const previousSpace = movement.gridSpaces[previousIndex];
-                    gridSpaceManager.releaseSpace(previousSpace);
-                }
-                gridSpaceManager.reserveSpace(position, token.id, movement.currentIndex);
-            }
-
-            // Removed the panCameraToToken call here to stop following the token
-        } catch (err) {
-            console.error(`Error moving token ${token.name}:`, err);
-        }
-    }
-
-
-    // Method to pan the camera smoothly to a token's position
-    // Method to pan the camera smoothly to a token's position
-    async panCameraAlongPath(rawPath) {
-        if (!this.allowCameraPanning || !game.settings.get("rtscontrols", "cameraPanning") || rawPath.length === 0) {
-            console.log("Camera panning is disabled or path is empty.");
-            return;
-        }
-
-        // If the game is paused then return early unless the user has GM access
-        if (game.paused && !game.user.isGM) {
-            ui.notifications.warn("Cannot pan camera while the game is paused.");
-            return;
-        }
-
-        // Check if camera panning is allowed
-        if (!this.allowCameraPanning) {
-            console.log("Camera panning has been cancelled.");
-            return;
-        }
-
-        this.isCameraPanning = true; // Indicate that camera panning has started
-
-        // Smooth out the path coordinates
-        const path = averagePathCoords(rawPath);
-
-        console.log(`Panning camera along smoothed path: ${JSON.stringify(path)}`);
-
-        const gridSize = canvas.grid.size;
-        let animations = []; // Array to hold promises for each animation
-
-        // Determine the starting index for the loop
-        // Skip the first waypoint only if there are two or more waypoints
-        const startIndex = (path.length > 1) ? 1 : 0;
-
-        for (let i = startIndex; i < path.length; i++) {
-            const point = path[i];
-            const pixelX = (point.x * gridSize) + (gridSize / 2); // Center of the grid cell
-            const pixelY = (point.y * gridSize) + (gridSize / 2);
-
-            // For the first point in our adjusted loop, pan immediately. For subsequent points, delay based on index.
-            const delay = (i === startIndex) ? 0 : 3000; // Adjust delay as needed
-
-            // Wrap the animation in a promise and push it to the animations array
-            let animationPromise = new Promise((resolve) => {
-                setTimeout(() => {
-                    canvas.animatePan({
-                        x: pixelX,
-                        y: pixelY,
-                        duration: 2000, // Adjust duration as needed for smoothness
-                        // Resolve the promise once the animation is complete
-                        onComplete: resolve
-                    });
-                }, delay);
-            });
-
-            animations.push(animationPromise);
-        }
-
-        // Wait for all animations to complete
-        await Promise.all(animations);
-
-        this.isCameraPanning = false; // Reset the flag once all panning is complete
     }
 }
 
-function averagePathCoords(path, neighborhoodSize = 2, similarityThreshold = 0.5) {
-    if (path.length < 2 * neighborhoodSize + 1) {
-        // If the path is too short for the chosen neighborhood size, return it unchanged.
-        return path;
-    }
-
-    let smoothedPath = [];
-
-    for (let i = 0; i < path.length; i++) {
-        let sumX = 0, sumY = 0, count = 0;
-
-        // Summing over the neighborhood
-        for (let j = -neighborhoodSize; j <= neighborhoodSize; j++) {
-            const index = i + j;
-            if (index >= 0 && index < path.length) {
-                sumX += path[index].x;
-                sumY += path[index].y;
-                count++;
-            }
-        }
-
-        const averagedPoint = {
-            x: sumX / count,
-            y: sumY / count,
-        };
-
-        // Add point if it's sufficiently different from the previous one
-        if (i === 0 || distanceBetween(averagedPoint, smoothedPath[smoothedPath.length - 1]) >= similarityThreshold) {
-            smoothedPath.push(averagedPoint);
-        }
-    }
-
-    return smoothedPath;
-}
-
-// Helper function to calculate distance between two points
-function distanceBetween(point1, point2) {
-    return Math.sqrt(Math.pow(point2.x - point1.x, 2) + Math.pow(point2.y - point1.y, 2));
-}
-
-
-// Instantiate the Movement Manager
-const movementManager = new MovementManager();
-
-// Event listener for right-click context menu to initiate token movement
-document.addEventListener("contextmenu", async (event) => {
-    event.preventDefault();
-
-    // Check if allowShiftRightClick is true, then proceed only if Shift is also being held down
-    const allowShiftRightClick = game.settings.get("rtscontrols", "allowShiftRightClick");
-    if (allowShiftRightClick && !event.shiftKey) {
-        console.log("Shift-right-click is required but Shift key is not pressed.");
-        return; // Exit the function early if Shift is required but not pressed
-    }
-
-    // Reset the camera panning allowance
-    movementManager.allowCameraPanning = true;
-
-    // Return early if the setting is disabled
-    if (!game.settings.get("rtscontrols", "disableModule")) {
-        console.log("Token movement is disabled.");
-        return; // Exit the function early to avoid initiating token movement
-    }
-
-    // Translate the click position to canvas coordinates
-    const transform = canvas.app.stage.worldTransform;
-    const toX = (event.clientX - transform.tx) / canvas.stage.scale.x;
-    const toY = (event.clientY - transform.ty) / canvas.stage.scale.y;
-
-    const toGridX = Math.floor(toX / canvas.grid.size);
-    const toGridY = Math.floor(toY / canvas.grid.size);
-
-    // Check if the right-click occurred on a token
-    const clickedToken = canvas.tokens.placeables.find(token => {
-        const tokenGridX = Math.floor(token.x / canvas.grid.size);
-        const tokenGridY = Math.floor(token.y / canvas.grid.size);
-        return toGridX === tokenGridX && toGridY === tokenGridY;
-    });
-
-    // If a token was clicked, ignore the move action
-    if (clickedToken) {
-        console.log("Right-click on a token detected. Ignoring move action.");
-        return;
-    }
-
-
-    // Check if the game is in combat mode
-    if (game.combat && game.combat.active) {
-        // Check the setting to see if right-click to move should be allowed in combat
-        if (!game.settings.get("rtscontrols", "allowRightClickCombat")) {
-            console.log("Game is in combat mode, right-click to move is disabled.");
-            ui.notifications.warn("Game is in combat mode, right-click to move is disabled by default.");
-            return; // Exit the function early to avoid initiating token movement
-        }
-    }
-
-    // Calculate the duration of the right-click
-    const clickDuration = Date.now() - rightClickStartTime;
-
-    // If the duration exceeds the threshold, it's considered a pan, not a click
-    if (clickDuration >= clickThreshold) {
-        console.log("Ignoring pan action for token movement.");
-        return; // Exit the function early to avoid initiating token movement
-    }
-
-
-    const selectedTokens = canvas.tokens.controlled;
-    if (selectedTokens.length === 0) return;
-
-    const gridSize = canvas.grid.size;
-    const destination = {x: toGridX, y: toGridY};
-
-    // Find alternative destinations for all tokens
-    const alternatives = await findAlternativeDestinations(destination, gridSize, selectedTokens.length);
-
-    // Calculate paths from each token's current location to the destination
-    for (let i = 0; i < selectedTokens.length; i++) {
-        const token = selectedTokens[i];
-        const start = gridSpaceManager.getGridSpaceFromToken(token); // Get the token's current grid space
-
-        // Use the clicked destination for the first token, or the best alternative destination for others
-        const targetDestination = (i < alternatives.length) ? alternatives[i].position : destination;
-
-        const pathResult = await findPath(start, targetDestination, gridSize);
-        if (pathResult && pathResult.path) {
-            movementManager.startMovement(token, pathResult.path);
-        } else {
-            console.warn(`No path found for token ${token.name} with ID ${token.id}`);
-        }
-    }
+Hooks.on("ready", function () {
+    const settingsManager = new SettingsManager();
+    settingsManager.registerSettings();
+    initializePathfindingModule(settingsManager);
 });
 
-// Event listeners for Foundry VTT's pause and resume game events
-Hooks.on("pauseGame", () => {
-    // Pause all movements
-    movementManager.movements.forEach((_, tokenId) => {
-        movementManager.pauseMovement(tokenId);
-    });
-    console.log('Game paused, all movements paused.');
+Hooks.on("updateScene", function () {
+    this.movementManager.cancelAllMovements();
+    this.cameraManager.cancelCameraPan();
 });
 
-Hooks.on("resumeGame", () => {
-    // Resume all movements
-    movementManager.movements.forEach((_, tokenId) => {
-        movementManager.resumeMovement(tokenId);
-    });
-    console.log('Game resumed, all movements resumed.');
-});
-
-class GridSpaceCalculator {
-    // Method to calculate the line between two points in a grid
-    static calculateLine(start, end) {
-        const path = [];
-        const dx = Math.abs(end.x - start.x);
-        const dy = Math.abs(end.y - start.y);
-        const sx = (start.x < end.x) ? 1 : -1;
-        const sy = (start.y < end.y) ? 1 : -1;
-        let err = dx - dy;
-
-        while (true) {
-            path.push({x: start.x, y: start.y});
-
-            if (start.x === end.x && start.y === end.y) break;
-
-            const e2 = 2 * err;
-            if (e2 > -dy) {
-                err -= dy;
-                start.x += sx;
-            }
-            if (e2 < dx) {
-                err += dx;
-                start.y += sy;
-            }
-        }
-        return path;
-    }
-
-    // Method to calculate all grid spaces between waypoints
-    static calculateGridSpacesForPath(waypoints) {
-        console.log(`Calculating grid spaces for waypoints:`, waypoints);
-        if (waypoints.length < 2) {
-            console.log("Warning: Path has less than 2 waypoints, might result in no movement.");
-        }
-        const gridSpaces = [];
-        for (let i = 0; i < waypoints.length - 1; i++) {
-            const segment = this.calculateLine({...waypoints[i]}, {...waypoints[i + 1]});
-            console.log(`Segment from ${JSON.stringify(waypoints[i])} to ${JSON.stringify(waypoints[i + 1])}:`, segment);
-            gridSpaces.push(...segment);
-        }
-
-        // Removing duplicates, as lines may intersect on nodes
-        const uniqueGridSpaces = Array.from(new Set(gridSpaces.map(JSON.stringify)), JSON.parse);
-        console.log(`Calculated unique grid spaces:`, uniqueGridSpaces);
-
-        return uniqueGridSpaces;
-    }
+function initializePathfindingModule(settingsManager) {
+    const gridSpaceManager = new GridSpaceManager();
+    const pathfindingModule = new PathfindingModule(gridSpaceManager);
+    const visualManager = new VisualManager();
+    // Initialize MovementManager before CameraManager
+    const movementManager = new MovementManager(gridSpaceManager, visualManager);
+    // Pass movementManager to CameraManager
+    const cameraManager = new CameraManager(movementManager);
+    // Update MovementManager with the cameraManager reference
+    movementManager.cameraManager = cameraManager;
+    const eventManager = new EventManager(pathfindingModule, movementManager, visualManager, settingsManager);
 }
 
-function getAdjacentGridSpaces(center, includeCenter = false) {
-    const adjacent = [];
-    for (let dx = -1; dx <= 1; dx++) {
-        for (let dy = -1; dy <= 1; dy++) {
-            if (dx !== 0 || dy !== 0 || includeCenter) {
-                adjacent.push({x: center.x + dx, y: center.y + dy});
-            }
-        }
-    }
-    return adjacent;
-}
-
-class VisualManager {
-    constructor() {
-        this.lineGraphicsMap = new Map(); // Maps token ID to its line graphics
-        this.circleGraphicsMap = new Map(); // Maps token ID to its circle graphics
-    }
-
-    drawPathLine(tokenId, gridSpaces, movementColor) {
-
-
-        let lineGraphics = this.lineGraphicsMap.get(tokenId);
-        if (!lineGraphics) {
-            lineGraphics = new PIXI.Graphics();
-            this.lineGraphicsMap.set(tokenId, lineGraphics);
-            canvas.drawings.addChild(lineGraphics);
-        } else {
-            lineGraphics.clear();
-        }
-
-
-        const halfGridSize = canvas.grid.size / 2;
-        const lineAlpha = 0.5; // Base alpha value for the line
-        const fadeLength = 5; // Number of segments to apply the fading effect to
-
-
-        if (gridSpaces.length > 0) {
-            const firstSpace = gridSpaces[0];
-            lineGraphics.moveTo(firstSpace.x * canvas.grid.size + halfGridSize, firstSpace.y * canvas.grid.size + halfGridSize);
-
-            gridSpaces.forEach((space, index) => {
-                // Calculate the alpha for the current segment
-                let segmentAlpha = lineAlpha;
-                if (index < fadeLength) {
-                    segmentAlpha *= (index + 1) / fadeLength;
-                }
-
-                // Set the line style with the calculated alpha
-                lineGraphics.lineStyle({width: 2, color: movementColor, alpha: segmentAlpha, alignment: 0.5});
-
-
-                // if setting is enabled then draw the line, if not then do not draw the line segment
-                if (game.settings.get("rtscontrols", "drawPathLine")) {
-                    lineGraphics.lineTo(space.x * canvas.grid.size + halfGridSize, space.y * canvas.grid.size + halfGridSize);
-                } else {
-                }
-            });
-        }
-    }
-
-    drawDestinationCircle(tokenId, destination) {
-        let circleGraphics = this.circleGraphicsMap.get(tokenId);
-        if (!circleGraphics) {
-            circleGraphics = new PIXI.Graphics();
-            this.circleGraphicsMap.set(tokenId, circleGraphics);
-            canvas.drawings.addChild(circleGraphics);
-        } else {
-            circleGraphics.clear();
-        }
-
-        const halfGridSize = canvas.grid.size / 2;
-
-        // Override the colour with the one from the settings by getting from the settings
-        let color = game.settings.get("rtscontrols", "destinationCircleColor");
-
-
-        circleGraphics.beginFill(color, 0.1);
-        circleGraphics.drawCircle(destination.x * canvas.grid.size + halfGridSize, destination.y * canvas.grid.size + halfGridSize, canvas.grid.size / 2);
-        circleGraphics.endFill();
-    }
-
-    clearPathLine(tokenId) {
-        const lineGraphics = this.lineGraphicsMap.get(tokenId);
-        if (lineGraphics) {
-            lineGraphics.clear(); // Clears the graphics content
-            canvas.drawings.removeChild(lineGraphics); // Removes the graphics object from the canvas
-            this.lineGraphicsMap.delete(tokenId); // Removes the reference from the map
-        }
-    }
-
-    clearDestinationCircle(tokenId) {
-        const circleGraphics = this.circleGraphicsMap.get(tokenId);
-        if (circleGraphics) {
-            circleGraphics.clear(); // Clears the graphics content
-            canvas.drawings.removeChild(circleGraphics); // Removes the graphics object from the canvas
-            this.circleGraphicsMap.delete(tokenId); // Removes the reference from the map
-        }
-    }
-
-    clearAllDestinationCircles() {
-        this.circleGraphicsMap.forEach((circleGraphics) => {
-            circleGraphics.clear(); // Clears the graphics content
-            canvas.drawings.removeChild(circleGraphics); // Removes the graphics object from the canvas
-        });
-        this.circleGraphicsMap.clear(); // Clears the entire map
-    }
-
-
-    updatePathLine(tokenId, remainingGridSpaces) {
-        // Call this method with the remaining path when a token moves
-        const tokenVisuals = this.lineGraphicsMap.get(tokenId);
-        if (tokenVisuals) {
-            const color = tokenVisuals.color; // Ensure to store the color somewhere or pass it as a parameter
-            this.drawPathLine(tokenId, remainingGridSpaces, color);
-            // The destination circle should remain intact until the token reaches the destination
-        }
-    }
-}
-
-const visualManager = new VisualManager();
-
-document.addEventListener("keydown", (event) => {
-    if (event.key === "Escape") {
-        console.log('Escape key pressed, canceling all movements and clearing destination circles.');
-        movementManager.cancelAllMovements();
-    }
-});
-
-Hooks.on("pauseGame", (isPaused) => {
-    if (isPaused) {
-        // Game is paused
-        movementManager.movements.forEach((_, tokenId) => {
-            movementManager.pauseMovement(tokenId);
-        });
-        console.log('Game paused, all movements paused.');
-        // Clear the tick interval to stop movement updates
-        if (movementManager.tickInterval) {
-            clearInterval(movementManager.tickInterval);
-            movementManager.tickInterval = null;
-            console.log('Tick interval cleared.');
-        }
-    } else {
-        // Game is unpaused (resumed)
-        movementManager.movements.forEach((_, tokenId) => {
-            movementManager.resumeMovement(tokenId);
-        });
-        console.log('Game resumed, all movements resumed.');
-        // Restart the tick interval if there are movements to process
-        if (!movementManager.tickInterval && movementManager.movements.size > 0) {
-            console.log('Starting tick interval');
-            movementManager.tickInterval = setInterval(() => movementManager.tick(), movementManager.tickRate);
-        }
-    }
-});
-
-
-async function findAlternativeDestinations(destination, gridSize, numTokens) {
-    const alternatives = [];
-
-
-    // Calculate a range based on the number of tokens, with a minimum value to ensure at least some alternatives are checked
-    // The range is now directly proportional to the number of tokens
-    const range = Math.min(numTokens, 3); // Limit the range to a maximum of 3 for example
-
-    // Loop through a grid around the destination within the calculated range
-    for (let dx = -range; dx <= range; dx++) {
-        for (let dy = -range; dy <= range; dy++) {
-            const alternativeEnd = {x: destination.x + dx, y: destination.y + dy};
-            // Skip out-of-bounds locations
-            if (!isValidGridCoordinate(alternativeEnd)) continue;
-            // Calculate the path from the alternative destination to the primary destination
-            try {
-                const pathResult = await routinglib.calculatePath(alternativeEnd, destination, {interpolate: false});
-                if (pathResult && pathResult.path) {
-                    alternatives.push({position: alternativeEnd, cost: pathResult.cost});
-                }
-            } catch (error) {
-                console.error(`Error calculating path to alternative destination: (${alternativeEnd.x}, ${alternativeEnd.y})`, error);
-            }
-        }
-    }
-
-    // Output console log telling how many grid spaces were checked
-    console.log(`Checked ${alternatives.length} grid spaces around destination (${destination.x}, ${destination.y})`);
-
-    // Sort the alternatives by cost, ascending
-    alternatives.sort((a, b) => a.cost - b.cost);
-
-    // Return only the best alternatives up to the number of selected tokens
-    return alternatives.slice(0, numTokens);
-}
-
-// Helper function to check if a grid coordinate is valid
-function isValidGridCoordinate(coordinate) {
-    const {x, y} = coordinate;
-    return x >= 0 && x < canvas.grid.width && y >= 0 && y < canvas.grid.height;
-}
