@@ -33,26 +33,12 @@ function isCurrentSceneGridless() {
     return canvas.scene.grid.type === 0;
 }
 
-function isValidPoint(point) {
-    return point && typeof point.x === 'number' && typeof point.y === 'number';
-}
-
-function validatePath(path) {
-    if (!Array.isArray(path) || path.length === 0) {
-        console.error("Invalid path: Path is not an array or is empty.");
-        return false;
-    }
-    return path.every(isValidPoint);
-}
-
 class PathfindingModule {
-    constructor(gridSpaceManager) {
-        this.gridSpaceManager = gridSpaceManager;
-    }
+    constructor() {}
 
     async calculatePathInternal(from, to, options = {}) {
         const isGridless = isCurrentSceneGridless();
-        console.log(`calculatePathInternal: Direct gridType check: ${canvas.scene.gridType}`);
+        console.log(`calculatePathInternal: Direct gridType check: ${canvas.scene.grid.type}`);
         console.log(`calculatePathInternal: calculatePathInternal called for a ${isGridless ? "gridless" : "gridded"} scene.`);
         console.log(`calculatePathInternal: From (treated as ${isGridless ? "pixels" : "grid coordinates"}):`, from);
         console.log(`calculatePathInternal: To (treated as ${isGridless ? "pixels" : "grid coordinates"}):`, to);
@@ -250,23 +236,6 @@ class PathfindingModule {
             x: sum.x / tokens.length,
             y: sum.y / tokens.length
         };
-    }
-
-    calculateFormationPositions(tokens, destination) {
-        const formation = []; // Array to hold adjusted positions
-        const gridSize = game.settings.get("rtscontrols", "gridlessGridSize");
-        const formationWidth = Math.ceil(Math.sqrt(tokens.length)); // Simple grid width
-        const spacing = gridSize * 1.5; // Spacing between tokens
-
-        for (let i = 0; i < tokens.length; i++) {
-            const row = Math.floor(i / formationWidth);
-            const col = i % formationWidth;
-            const adjustedX = destination.x + (col - Math.floor(formationWidth / 2)) * spacing;
-            const adjustedY = destination.y + (row - Math.floor(tokens.length / formationWidth / 2)) * spacing;
-            formation.push({x: adjustedX, y: adjustedY});
-        }
-
-        return formation;
     }
 
     interpolatePathForGridless(path) {
@@ -477,13 +446,6 @@ class VisualManager {
         return path.map(p => this.normalizePoint(p));
     }
 
-    colorToHexString(color) {
-        if (typeof color === 'number') {
-            return '#' + color.toString(16).padStart(6, '0');
-        }
-        return color;
-    }
-
     isValidPoint(point) {
         return point && typeof point.x === 'number' && typeof point.y === 'number';
     }
@@ -572,18 +534,26 @@ class VisualManager {
     }
 
     async clearPathLine(tokenId) {
-        // Attempt to delete the line drawing
         const lineDrawingId = this.pathLineDrawings.get(tokenId);
         if (lineDrawingId) {
-            await canvas.scene.deleteEmbeddedDocuments('Drawing', [lineDrawingId]);
-            this.pathLineDrawings.delete(tokenId);
+            const drawingExists = await canvas.scene.getEmbeddedDocument('Drawing', lineDrawingId);
+            if (drawingExists) {
+                await canvas.scene.deleteEmbeddedDocuments('Drawing', [lineDrawingId]);
+                this.pathLineDrawings.delete(tokenId);
+            } else {
+                console.warn(`Drawing ${lineDrawingId} does not exist.`);
+            }
         }
 
-        // Attempt to delete the circle drawing
         const circleDrawingId = this.pathLineDrawings.get(tokenId + "_circle");
         if (circleDrawingId) {
-            await canvas.scene.deleteEmbeddedDocuments('Drawing', [circleDrawingId]);
-            this.pathLineDrawings.delete(tokenId + "_circle");
+            const drawingExists = await canvas.scene.getEmbeddedDocument('Drawing', circleDrawingId);
+            if (drawingExists) {
+                await canvas.scene.deleteEmbeddedDocuments('Drawing', [circleDrawingId]);
+                this.pathLineDrawings.delete(tokenId + "_circle");
+            } else {
+                console.warn(`Circle Drawing ${circleDrawingId} does not exist.`);
+            }
         }
     }
 
@@ -723,7 +693,7 @@ class SettingsManager {
                 "1000": "Traps Around Every Corner",
             },
             default: "400", // Default to Normal speed
-            onChange: value => {
+            onChange:() => {
                 ui.notifications.info("Movement speed setting changed. Please reload your application for the change to take effect.", {permanent: true});
                 window.location.reload();
             }
@@ -929,7 +899,6 @@ class EventManager {
 class CameraManager {
     constructor(movementManager) {
         this.movementManager = movementManager;
-        this.isCameraPanning = false;
         this.allowCameraPanning = true;
         this.followInterval = null; // Interval for following the token
     }
@@ -1035,11 +1004,8 @@ function initializePathfindingModule(settingsManager) {
     const gridSpaceManager = new GridSpaceManager();
     const pathfindingModule = new PathfindingModule(gridSpaceManager);
     const visualManager = new VisualManager();
-    // Initialize MovementManager before CameraManager
     const movementManager = new MovementManager(gridSpaceManager, visualManager);
-    // Pass movementManager to CameraManager
     const cameraManager = new CameraManager(movementManager);
-    // Update MovementManager with the cameraManager reference
     movementManager.cameraManager = cameraManager;
     const eventManager = new EventManager(pathfindingModule, movementManager, visualManager, settingsManager);
 }
