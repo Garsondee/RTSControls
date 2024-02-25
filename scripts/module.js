@@ -419,8 +419,30 @@ class MovementManager {
 }
 
 class VisualManager {
-    constructor() {
+    constructor(settingsManager) {
+        this.settingsManager = settingsManager;
         this.pathLineDrawings = new Map();
+        this.drawingOperationsQueue = []; // Queue for drawing operations
+        this.processingQueue = false; // Flag to indicate if the queue is currently being processed
+    }
+
+    // Method to add a drawing operation to the queue
+    enqueueDrawingOperation(operation) {
+        this.drawingOperationsQueue.push(operation);
+        this.processDrawingOperationsQueue();
+    }
+
+    // Method to process the drawing operations queue
+    async processDrawingOperationsQueue() {
+        if (this.processingQueue || this.drawingOperationsQueue.length === 0) {
+            return;
+        }
+        this.processingQueue = true;
+        while (this.drawingOperationsQueue.length > 0) {
+            const operation = this.drawingOperationsQueue.shift();
+            await operation();
+        }
+        this.processingQueue = false;
     }
 
     // Determine if the current scene is gridless
@@ -459,102 +481,112 @@ class VisualManager {
     }
 
     async drawPathLine(tokenId, path, color = game.settings.get("rtscontrols", "destinationCircleColor")) {
-        if (!this.validatePath(path)) {
-            console.error("drawPathLine: Invalid path data.");
-            return;
-        }
 
-        const normalizedPath = this.normalizePath(path);
-        const strokeColor = game.settings.get("rtscontrols", "destinationCircleColor");
-        const points = normalizedPath.flatMap(p => [p.x, p.y]);
+        this.enqueueDrawingOperation(async () => {
+            if (!this.validatePath(path)) {
+                console.error("drawPathLine: Invalid path data.");
+                return;
+            }
 
-        const drawingData = {
-            type: "p",
-            author: game.user.id,
-            x: 0, y: 0,
-            strokeWidth: 3,
-            strokeColor: strokeColor,
-            strokeAlpha: 1.0,
-            fillColor: "#00000000",
-            fillAlpha: 0.0,
-            points: points,
-            texture: "",
-            hidden: false,
-            locked: true
-        };
+            const normalizedPath = this.normalizePath(path);
+            const strokeColor = game.settings.get("rtscontrols", "destinationCircleColor");
+            const points = normalizedPath.flatMap(p => [p.x, p.y]);
 
-        try {
-            const createdDrawing = await DrawingDocument.create(drawingData, {parent: canvas.scene});
-            this.pathLineDrawings.set(tokenId, createdDrawing.id);
-            // Draw a circle at the endpoint
-            await this.drawCircleAtEndpoint(tokenId, normalizedPath[normalizedPath.length - 1], color);
-        } catch (error) {
-            console.error("Error creating path line drawing:", error);
-        }
+            const drawingData = {
+                type: "p",
+                author: game.user.id,
+                x: 0, y: 0,
+                strokeWidth: 3,
+                strokeColor: strokeColor,
+                strokeAlpha: 1.0,
+                fillColor: "#00000000",
+                fillAlpha: 0.0,
+                points: points,
+                texture: "",
+                hidden: false,
+                locked: true
+            };
+
+            try {
+                const createdDrawing = await DrawingDocument.create(drawingData, {parent: canvas.scene});
+                this.pathLineDrawings.set(tokenId, createdDrawing.id);
+                // Draw a circle at the endpoint
+                await this.drawCircleAtEndpoint(tokenId, normalizedPath[normalizedPath.length - 1], color);
+            } catch (error) {
+                console.error("Error creating path line drawing:", error);
+            }
+        });
     }
 
-    async drawCircleAtEndpoint(tokenId, endpoint, color = game.settings.get("rtscontrols", "destinationCircleColor")) {
-        const circleData = {
-            type: "e", // Ellipse type
-            author: game.user.id,
-            x: endpoint.x - ((canvas.grid.size / 2) / 2),
-            y: endpoint.y - ((canvas.grid.size / 2) / 2),
-            width: 50, // Adjust size as needed
-            height: 50, // Adjust size as needed
-            strokeColor: game.settings.get("rtscontrols", "destinationCircleColor"),
-            strokeAlpha: 1.0,
-            strokeWidth: 25,
-            fillColor: game.settings.get("rtscontrols", "destinationCircleColor"),
-            fillAlpha: 1.0,
-            hidden: false,
-            locked: true
-        };
+    async drawCircleAtEndpoint(tokenId, endpoint) {
+        // Directly fetch the color setting within the method
+        const color = game.settings.get("rtscontrols", "destinationCircleColor");
 
-        try {
-            const createdCircle = await DrawingDocument.create(circleData, {parent: canvas.scene});
-            // Optionally, store the circle's ID if you need to reference it later
-            this.pathLineDrawings.set(tokenId + "_circle", createdCircle.id);
-        } catch (error) {
-            console.error("Error creating endpoint circle:", error);
-        }
+        this.enqueueDrawingOperation(async () => {
+            const circleData = {
+                type: "e", // Ellipse type
+                author: game.user.id,
+                x: endpoint.x - ((canvas.grid.size / 2) / 2),
+                y: endpoint.y - ((canvas.grid.size / 2) / 2),
+                width: 50, // Adjust size as needed
+                height: 50, // Adjust size as needed
+                strokeColor: color,
+                strokeAlpha: 1.0,
+                strokeWidth: 25,
+                fillColor: color,
+                fillAlpha: 1.0,
+                hidden: false,
+                locked: true
+            };
+
+            try {
+                const createdCircle = await DrawingDocument.create(circleData, {parent: canvas.scene});
+                // Optionally, store the circle's ID if you need to reference it later
+                this.pathLineDrawings.set(tokenId + "_circle", createdCircle.id);
+            } catch (error) {
+                console.error("Error creating endpoint circle:", error);
+            }
+        });
     }
 
     updatePathVisibility(tokenId, progress) {
-        const drawingId = this.pathLineDrawings.get(tokenId);
-        if (!drawingId) return;
+        this.enqueueDrawingOperation(async () => {
+            const drawingId = this.pathLineDrawings.get(tokenId);
+            if (!drawingId) return;
 
-        const drawing = canvas.drawings.get(drawingId);
-        if (!drawing) return;
+            const drawing = canvas.drawings.get(drawingId);
+            if (!drawing) return;
 
-        // Calculate new alpha based on progress
-        const newAlpha = Math.max(1 - progress, 0);
+            // Calculate new alpha based on progress
+            const newAlpha = Math.max(1 - progress, 0);
 
-        // Update the drawing's stroke alpha
-        drawing.document.update({strokeAlpha: newAlpha}).catch(console.error);
+            // Update the drawing's stroke alpha
+            await drawing.document.update({strokeAlpha: newAlpha}).catch(console.error);
+        });
     }
 
-    async clearPathLine(tokenId) {
-        const lineDrawingId = this.pathLineDrawings.get(tokenId);
-        if (lineDrawingId) {
-            const drawingExists = await canvas.scene.getEmbeddedDocument('Drawing', lineDrawingId);
-            if (drawingExists) {
-                await canvas.scene.deleteEmbeddedDocuments('Drawing', [lineDrawingId]);
-                this.pathLineDrawings.delete(tokenId);
-            } else {
-                console.warn(`Drawing ${lineDrawingId} does not exist.`);
-            }
-        }
 
-        const circleDrawingId = this.pathLineDrawings.get(tokenId + "_circle");
-        if (circleDrawingId) {
-            const drawingExists = await canvas.scene.getEmbeddedDocument('Drawing', circleDrawingId);
-            if (drawingExists) {
-                await canvas.scene.deleteEmbeddedDocuments('Drawing', [circleDrawingId]);
-                this.pathLineDrawings.delete(tokenId + "_circle");
-            } else {
-                console.warn(`Circle Drawing ${circleDrawingId} does not exist.`);
+    // Updated method to clear path line using the queue
+    async clearPathLine(tokenId) {
+        this.enqueueDrawingOperation(async () => {
+            const lineDrawingId = this.pathLineDrawings.get(tokenId);
+            if (lineDrawingId) {
+                const drawingExists = await canvas.scene.getEmbeddedDocument('Drawing', lineDrawingId);
+                if (drawingExists) {
+                    await canvas.scene.deleteEmbeddedDocuments('Drawing', [lineDrawingId]);
+                    this.pathLineDrawings.delete(tokenId);
+                }
             }
-        }
+
+            const circleDrawingId = this.pathLineDrawings.get(tokenId + "_circle");
+            if (circleDrawingId) {
+                const drawingExists = await canvas.scene.getEmbeddedDocument('Drawing', circleDrawingId);
+                if (drawingExists) {
+                    await canvas.scene.deleteEmbeddedDocuments('Drawing', [circleDrawingId]);
+                    this.pathLineDrawings.delete(tokenId + "_circle");
+                }
+            }
+        });
     }
 
     async clearAllVisuals() {
@@ -1003,10 +1035,9 @@ Hooks.on("updateScene", function () {
 function initializePathfindingModule(settingsManager) {
     const gridSpaceManager = new GridSpaceManager();
     const pathfindingModule = new PathfindingModule(gridSpaceManager);
-    const visualManager = new VisualManager();
+    const visualManager = new VisualManager(settingsManager);
     const movementManager = new MovementManager(gridSpaceManager, visualManager);
     const cameraManager = new CameraManager(movementManager);
     movementManager.cameraManager = cameraManager;
     const eventManager = new EventManager(pathfindingModule, movementManager, visualManager, settingsManager);
 }
-
