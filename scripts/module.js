@@ -481,6 +481,11 @@ class VisualManager {
     }
 
     async drawPathLine(tokenId, path, color = game.settings.get("rtscontrols", "destinationCircleColor")) {
+        // Check if line drawing is enabled
+        if (!game.settings.get("rtscontrols", "drawPathLine")) {
+            console.log("Line drawing is disabled.");
+            return;
+        }
 
         this.enqueueDrawingOperation(async () => {
             if (!this.validatePath(path)) {
