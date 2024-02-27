@@ -816,6 +816,29 @@ class EventManager {
     async handleRightClick(event) {
         event.preventDefault();
 
+        const selectedTokens = canvas.tokens.controlled;
+
+        if (canvas.tokens.controlled.length === 0) {
+            ui.notifications.warn("No token selected!");
+        } else {
+            canvas.tokens.controlled.forEach(token => {
+                const isOwner = token.actor.isOwner;
+                if (isOwner) {
+                    console.log(`You are the owner of the token: ${token.name}.`);
+                } else {
+                    console.warn(`You do not have ownership of the token: ${token.name}.`);
+                }
+            });
+        }
+
+        // Define controllableTokens based on ownership
+        const controllableTokens = canvas.tokens.controlled.filter(token => token.actor && token.actor.isOwner);
+
+        if (controllableTokens.length === 0) {
+            console.log("No controllable tokens selected.");
+            return;
+        }
+
         if (!this.settingsManager.getSetting("disableModule")) {
             console.log("Token movement is disabled.");
             return;
@@ -832,9 +855,6 @@ class EventManager {
         const mouseY = (event.clientY - transform.ty) / canvas.stage.scale.y;
 
         const isGridless = isCurrentSceneGridless();
-
-        const selectedTokens = canvas.tokens.controlled;
-        if (selectedTokens.length === 0) return;
 
         // Check for a clicked token to ignore move action
         const clickedToken = canvas.tokens.placeables.find(t => {
